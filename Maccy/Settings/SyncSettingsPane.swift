@@ -15,7 +15,7 @@ struct SyncSettingsPane: View {
   @State private var cloudSync = CloudSyncManager.shared
 
   var body: some View {
-    Settings.Container(contentWidth: 520) {
+    Settings.Container(contentWidth: 460) {
       Settings.Section(
         bottomDivider: true,
         label: { Text("Đồng bộ:") }
@@ -61,7 +61,7 @@ struct SyncSettingsPane: View {
               cloudSync.chooseSyncFolderWithPanel()
             }
 
-            Button("Tự động tìm Google Drive") {
+            Button("Tự động tìm Drive") {
               if cloudSync.autoDetectGoogleDriveIfNeeded(forceUpdate: true) == nil {
                 cloudSync.chooseSyncFolderWithPanel()
               } else {
@@ -75,6 +75,7 @@ struct SyncSettingsPane: View {
               }
             }
           }
+          .controlSize(.small)
         }
         .disabled(!cloudSyncEnabled)
       }
@@ -104,7 +105,7 @@ struct SyncSettingsPane: View {
           }
 
           Defaults.Toggle(key: .warnBeforeSyncingSecrets) {
-            Text("Cảnh báo khi đồng bộ API Key / Private Key mà chưa bật mã hoá")
+            Text("Cảnh báo khi đồng bộ API Key / Private Key chưa mã hoá")
           }
           .disabled(!cloudSyncEnabled)
 

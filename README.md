@@ -13,6 +13,38 @@
 
 Phiên bản này giữ nguyên triết lý gọn nhẹ của Maccy gốc, đồng thời bổ sung các cải tiến chuyên sâu cho nhu cầu làm việc thực tế trên nhiều máy Mac:
 
+## 📸 Hình ảnh giao diện thực tế (Screenshots)
+
+### Giao diện chính — Chống treo nội dung lớn & Đồng bộ Google Drive
+<p align="center">
+  <img src="docs/screenshots/popup-sync-preview.png" width="880" alt="Giao diện Maccy — Xem trước nội dung lớn 4.8 MB chống treo và trạng thái đồng bộ Google Drive" />
+</p>
+
+### Tra cứu Tiếng Việt không dấu (`dong bo du lieu` → `đồng bộ dữ liệu`)
+<p align="center">
+  <img src="docs/screenshots/vietnamese-search.png" width="880" alt="Tra cứu tiếng Việt không dấu trên Maccy" />
+</p>
+
+### Cài đặt Google Drive (AES-256 GCM), Phím tắt (`⇧⌘V` / `⇧⌘C`) & Lưu trữ
+<table>
+  <tr>
+    <td align="center" valign="top" width="50%">
+      <strong>Đồng bộ Google Drive & Mã hoá AES-256</strong><br/><br/>
+      <img src="docs/screenshots/google-drive-settings.png" width="430" alt="Cài đặt đồng bộ Google Drive và mã hoá AES-256 GCM" />
+    </td>
+    <td align="center" valign="top" width="50%">
+      <strong>Phím tắt mở nhanh (⇧⌘V) & Dán Plain Text (⇧⌘C)</strong><br/><br/>
+      <img src="docs/screenshots/shortcuts-settings.png" width="430" alt="Cài đặt phím tắt mặc định ⇧⌘V và ⇧⌘C" />
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center" valign="top">
+      <strong>Quản lý Lưu trữ & Giới hạn dung lượng mỗi mục chống treo</strong><br/><br/>
+      <img src="docs/screenshots/storage-settings.png" width="460" alt="Cài đặt lưu trữ và giới hạn dung lượng mỗi mục" />
+    </td>
+  </tr>
+</table>
+
 ### 1. ⚡ Chống treo tuyệt đối khi copy hoặc lưu nội dung dài (Large Content Anti-Freeze)
 - **Giữ nguyên 100% dữ liệu gốc khi Paste**, không làm mất bất kỳ ký tự nào kể cả với log/code/JSON hàng chục MB.
 - Giới hạn giải mã UTF-8 tối đa **4 KB** cho tiêu đề (`title`) và **32 KB** cho khung xem trước (`preview`), khắc phục triệt để lỗi duyệt chuỗi đa dòng gây treo Main Thread.
