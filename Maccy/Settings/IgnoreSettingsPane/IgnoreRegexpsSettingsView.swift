@@ -50,8 +50,3 @@ struct IgnoreRegexpsSettingsView: View {
     ignoredRegexps.removeAll(where: { $0 == regexp })
   }
 }
-
-#Preview {
-  IgnoreRegexpsSettingsView()
-    .environment(\.locale, .init(identifier: "en"))
-}

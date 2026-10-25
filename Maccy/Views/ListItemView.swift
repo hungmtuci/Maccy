@@ -37,10 +37,11 @@ struct ListItemView<Title: View, ID: Hashable>: View {
   var attributedTitle: AttributedString?
   var shortcuts: [KeyShortcut]
   var isSelected: Bool
+  var isSynced: Bool = false
+  var onToggleSync: (() -> Void)? = nil
   var selectionIndex: Int?
   var help: LocalizedStringKey?
   var selectionAppearance: SelectionAppearance = .none
-  // Complete description used when the row's visual content is hidden from accessibility.
   var accessibilityLabel: String = ""
   @ViewBuilder var title: () -> Title
 
@@ -48,7 +49,6 @@ struct ListItemView<Title: View, ID: Hashable>: View {
   @Environment(AppState.self) private var appState
   @Environment(ModifierFlags.self) private var modifierFlags
 
-  // Use the same selection number for the visible badge and accessibility value.
   private var displaySelectionIndex: String? {
     selectionIndex.map { "\($0 + 1)" }
   }
@@ -91,6 +91,19 @@ struct ListItemView<Title: View, ID: Hashable>: View {
       Spacer()
 
       HStack(spacing: 5) {
+        if isSynced {
+          Button {
+            onToggleSync?()
+          } label: {
+            Image(systemName: "icloud.fill")
+              .font(.system(size: 11))
+              .foregroundStyle(isSelected ? Color.white : Color.accentColor)
+          }
+          .buttonStyle(.plain)
+          .help("Đã đồng bộ Google Drive (Nhấn hoặc bấm ⌥S để bỏ đồng bộ)")
+          .accessibilityHidden(true)
+        }
+
         if let displaySelectionIndex {
           Text(displaySelectionIndex)
             .font(.caption)
@@ -122,8 +135,6 @@ struct ListItemView<Title: View, ID: Hashable>: View {
     .id(id)
     .frame(maxWidth: .infinity, alignment: .leading)
     .foregroundStyle(isSelected ? Color.white : .primary)
-    // macOS 26 broke hovering if no background is present.
-    // The slight opcaity white background is a workaround
     .background(
       isSelected ? Color.accentColor.opacity(0.8) : .white.opacity(0.001),
       in: selectionAppearance.rect(cornerRadius: Popup.cornerRadius)

@@ -1,20 +1,72 @@
 import AppKit
+import CryptoKit
 import Defaults
+import Observation
 import Sauce
 import SwiftData
 import Vision
 
-@Model
-class HistoryItem {
+nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sendable {
+  private let _$observationRegistrar = Observation.ObservationRegistrar()
+  var _$backingData: any SwiftData.BackingData<HistoryItem> = HistoryItem.createBackingData()
+
+  var persistentBackingData: any SwiftData.BackingData<HistoryItem> {
+    get { _$backingData }
+    set { _$backingData = newValue }
+  }
+
+  static var schemaMetadata: [SwiftData.Schema.PropertyMetadata] {
+    return [
+      SwiftData.Schema.PropertyMetadata(
+        name: "application",
+        keypath: \HistoryItem.application,
+        defaultValue: nil,
+        metadata: nil
+      ),
+      SwiftData.Schema.PropertyMetadata(
+        name: "firstCopiedAt",
+        keypath: \HistoryItem.firstCopiedAt,
+        defaultValue: Date.now,
+        metadata: nil
+      ),
+      SwiftData.Schema.PropertyMetadata(
+        name: "lastCopiedAt",
+        keypath: \HistoryItem.lastCopiedAt,
+        defaultValue: Date.now,
+        metadata: nil
+      ),
+      SwiftData.Schema.PropertyMetadata(
+        name: "numberOfCopies",
+        keypath: \HistoryItem.numberOfCopies,
+        defaultValue: 1,
+        metadata: nil
+      ),
+      SwiftData.Schema.PropertyMetadata(
+        name: "pin",
+        keypath: \HistoryItem.pin,
+        defaultValue: nil,
+        metadata: nil
+      ),
+      SwiftData.Schema.PropertyMetadata(
+        name: "title",
+        keypath: \HistoryItem.title,
+        defaultValue: "",
+        metadata: nil
+      ),
+      SwiftData.Schema.PropertyMetadata(
+        name: "contents",
+        keypath: \HistoryItem.contents,
+        defaultValue: [HistoryItemContent](),
+        metadata: SwiftData.Schema.Relationship(
+          deleteRule: .cascade,
+          inverse: \HistoryItemContent.item
+        )
+      )
+    ]
+  }
+
   @MainActor
   static var supportedPins: Set<String> {
-    // "a" reserved for select all
-    // "q" reserved for quit
-    // "v" reserved for paste
-    // "w" reserved for close window
-    // "z" reserved for undo/redo
-    // "," reserved for preferences
-    // "`" reserved for cycling through windows
     var keys = Set([
       "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l",
       "m", "n", "o", "p", "r", "s", "t", "u", "x", "y",
@@ -32,6 +84,10 @@ class HistoryItem {
     }
     if let previewKey = KeyChord.previewKey,
        let character = Sauce.shared.character(for: Int(previewKey.QWERTYKeyCode), modifiers: .cocoa([])) {
+      keys.remove(character)
+    }
+    if let syncKey = KeyChord.syncKey,
+       let character = Sauce.shared.character(for: Int(syncKey.QWERTYKeyCode), modifiers: .cocoa([])) {
       keys.remove(character)
     }
 
@@ -61,7 +117,7 @@ class HistoryItem {
   @MainActor
   static var randomAvailablePin: String { availablePins.randomElement() ?? "" }
 
-  private static let transientTypes: [String] = [
+  static let transientTypes: Set<String> = [
     NSPasteboard.PasteboardType.modified.rawValue,
     NSPasteboard.PasteboardType.fromMaccy.rawValue,
     NSPasteboard.PasteboardType.linkPresentationMetadata.rawValue,
@@ -74,32 +130,186 @@ class HistoryItem {
   ]
   private static let imageTypes: [NSPasteboard.PasteboardType] = StorageType.images.types
 
-  var application: String?
-  var firstCopiedAt: Date = Date.now
-  var lastCopiedAt: Date = Date.now
-  var numberOfCopies: Int = 1
-  var pin: String?
-  var title = ""
+  var application: String? {
+    get {
+      _$observationRegistrar.access(self, keyPath: \.application)
+      return self.getValue(forKey: \.application)
+    }
+    set {
+      _$observationRegistrar.withMutation(of: self, keyPath: \.application) {
+        self.setValue(forKey: \.application, to: newValue)
+      }
+    }
+  }
 
-  @Relationship(deleteRule: .cascade, inverse: \HistoryItemContent.item)
-  var contents: [HistoryItemContent] = []
+  var firstCopiedAt: Date {
+    get {
+      _$observationRegistrar.access(self, keyPath: \.firstCopiedAt)
+      return self.getValue(forKey: \.firstCopiedAt)
+    }
+    set {
+      _$observationRegistrar.withMutation(of: self, keyPath: \.firstCopiedAt) {
+        self.setValue(forKey: \.firstCopiedAt, to: newValue)
+      }
+    }
+  }
 
-  @Transient private var cachedDecodedImage: NSImage?
+  var lastCopiedAt: Date {
+    get {
+      _$observationRegistrar.access(self, keyPath: \.lastCopiedAt)
+      return self.getValue(forKey: \.lastCopiedAt)
+    }
+    set {
+      _$observationRegistrar.withMutation(of: self, keyPath: \.lastCopiedAt) {
+        self.setValue(forKey: \.lastCopiedAt, to: newValue)
+      }
+    }
+  }
+
+  var numberOfCopies: Int {
+    get {
+      _$observationRegistrar.access(self, keyPath: \.numberOfCopies)
+      return self.getValue(forKey: \.numberOfCopies)
+    }
+    set {
+      _$observationRegistrar.withMutation(of: self, keyPath: \.numberOfCopies) {
+        self.setValue(forKey: \.numberOfCopies, to: newValue)
+      }
+    }
+  }
+
+  var pin: String? {
+    get {
+      _$observationRegistrar.access(self, keyPath: \.pin)
+      return self.getValue(forKey: \.pin)
+    }
+    set {
+      _$observationRegistrar.withMutation(of: self, keyPath: \.pin) {
+        self.setValue(forKey: \.pin, to: newValue)
+      }
+    }
+  }
+
+  var title: String {
+    get {
+      _$observationRegistrar.access(self, keyPath: \.title)
+      return self.getValue(forKey: \.title)
+    }
+    set {
+      _$observationRegistrar.withMutation(of: self, keyPath: \.title) {
+        self.setValue(forKey: \.title, to: newValue)
+      }
+    }
+  }
+
+  var contents: [HistoryItemContent] {
+    get {
+      _$observationRegistrar.access(self, keyPath: \.contents)
+      return self.getValue(forKey: \.contents)
+    }
+    set {
+      cachedContentHash = nil
+      cachedTotalByteCount = nil
+      _$observationRegistrar.withMutation(of: self, keyPath: \.contents) {
+        self.setValue(forKey: \.contents, to: newValue)
+      }
+    }
+  }
+
+  private var cachedDecodedImage: NSImage?
+  private var cachedContentHash: String?
+  private var cachedTotalByteCount: Int?
 
   init(contents: [HistoryItemContent] = []) {
-    self.firstCopiedAt = firstCopiedAt
-    self.lastCopiedAt = lastCopiedAt
-    self.contents = contents
+    let now = Date.now
+    _$backingData.setValue(forKey: \.application, to: nil)
+    _$backingData.setValue(forKey: \.firstCopiedAt, to: now)
+    _$backingData.setValue(forKey: \.lastCopiedAt, to: now)
+    _$backingData.setValue(forKey: \.numberOfCopies, to: 1)
+    _$backingData.setValue(forKey: \.pin, to: nil)
+    _$backingData.setValue(forKey: \.title, to: "")
+    _$backingData.setValue(forKey: \.contents, to: [])
+    if !contents.isEmpty {
+      self.contents = contents
+    }
+  }
+
+  required init(backingData: any SwiftData.BackingData<HistoryItem>) {
+    self._$backingData = backingData
+  }
+
+  func invalidateContentCache() {
+    cachedContentHash = nil
+    cachedTotalByteCount = nil
+  }
+
+  /// Fast, bounded SHA-256 fingerprint of non-transient contents.
+  /// Avoids scanning or loading multi-megabyte SQLite blobs repeatedly during deduplication and sync.
+  var contentHash: String {
+    if let cached = cachedContentHash {
+      return cached
+    }
+
+    var hasher = SHA256()
+    let relevantContents = contents
+      .filter { !Self.transientTypes.contains($0.type) }
+      .sorted { $0.type < $1.type }
+
+    if relevantContents.isEmpty {
+      hasher.update(data: Data(title.utf8))
+    } else {
+      for content in relevantContents {
+        hasher.update(data: Data(content.type.utf8))
+        if let data = content.value {
+          var count = data.count
+          withUnsafeBytes(of: &count) { hasher.update(bufferPointer: $0) }
+          if data.count <= 65_536 {
+            hasher.update(data: data)
+          } else {
+            // Sample first 32 KB, middle 16 KB, and last 16 KB for O(1) hashing on multi-MB data
+            hasher.update(data: data.prefix(32_768))
+            let midStart = data.count / 2 - 8_192
+            hasher.update(data: data.subdata(in: midStart..<(midStart + 16_384)))
+            hasher.update(data: data.suffix(16_384))
+          }
+        }
+      }
+    }
+
+    let digest = hasher.finalize()
+    let hashString = digest.map { String(format: "%02x", $0) }.joined()
+    cachedContentHash = hashString
+    return hashString
+  }
+
+  var totalByteCount: Int {
+    if let cached = cachedTotalByteCount {
+      return cached
+    }
+    let total = contents.reduce(0) { $0 + ($1.value?.count ?? 0) }
+    cachedTotalByteCount = total
+    return total
   }
 
   func supersedes(_ item: HistoryItem) -> Bool {
-    return item.contents
-      .filter { content in
-        !Self.transientTypes.contains(content.type)
+    let otherNonTransient = item.contents.filter { !Self.transientTypes.contains($0.type) }
+    guard !otherNonTransient.isEmpty else { return false }
+
+    let myTypes = Set(contents.lazy.filter { !Self.transientTypes.contains($0.type) }.map(\.type))
+    let otherTypes = Set(otherNonTransient.map(\.type))
+    guard myTypes.isSuperset(of: otherTypes) else { return false }
+
+    if myTypes == otherTypes {
+      return self.contentHash == item.contentHash
+    }
+
+    return otherNonTransient.allSatisfy { otherContent in
+      contents.contains { myContent in
+        guard myContent.type == otherContent.type else { return false }
+        guard myContent.value?.count == otherContent.value?.count else { return false }
+        return myContent.value == otherContent.value
       }
-      .allSatisfy { content in
-        contents.contains(where: { $0.type == content.type && $0.value == content.value })
-      }
+    }
   }
 
   @MainActor
@@ -118,8 +328,8 @@ class HistoryItem {
       return ""
     }
 
-    // 1k characters is trade-off for performance
-    var title = previewableText
+    // Decode at most 4 KB of UTF-8 to generate a 1,000-character title without allocating multi-MB strings.
+    var title = previewableTextPrefix(maxBytes: 4_096).text
       .shortened(to: 1_000)
       .removingScalarsUnsafeForTitleLayout()
 
@@ -140,20 +350,50 @@ class HistoryItem {
     return title
   }
 
-  var previewableText: String {
+  /// Bounded preview text extractor that never decodes multi-megabyte strings on the main thread.
+  func previewableTextPrefix(maxBytes: Int = 40_000) -> (text: String, totalBytes: Int) {
     if !fileURLs.isEmpty {
-      fileURLs
+      let joined = fileURLs
         .compactMap { $0.absoluteString.removingPercentEncoding }
         .joined(separator: "\n")
-    } else if let text = text, !text.isEmpty {
-      text
-    } else if let rtf = rtf, !rtf.string.isEmpty {
-      rtf.string
-    } else if let html = html, !html.string.isEmpty {
-      html.string
-    } else {
-      title
+      return (joined.shortened(to: maxBytes), joined.utf8.count)
     }
+
+    if let stringData = contentData([.string]), !stringData.isEmpty {
+      let prefixText = stringData.utf8PrefixString(maxBytes: maxBytes) ?? ""
+      if !prefixText.isEmpty {
+        return (prefixText, stringData.count)
+      }
+    }
+
+    if let rtfData = contentData([.rtf]), !rtfData.isEmpty {
+      // Only parse RTF via NSAttributedString if <= 256 KB to prevent main-thread CoreText freezes
+      if rtfData.count <= 262_144,
+         let attr = NSAttributedString(rtf: rtfData, documentAttributes: nil),
+         !attr.string.isEmpty {
+        return (attr.string.shortened(to: maxBytes), rtfData.count)
+      } else if let rawPrefix = rtfData.utf8PrefixString(maxBytes: maxBytes) {
+        return (rawPrefix, rtfData.count)
+      }
+    }
+
+    if let htmlData = contentData([.html]), !htmlData.isEmpty {
+      // NSAttributedString(html:) invokes WebKit on the main thread and freezes on large HTML
+      if htmlData.count <= 65_536,
+         let attr = NSAttributedString(html: htmlData, documentAttributes: nil),
+         !attr.string.isEmpty {
+        return (attr.string.shortened(to: maxBytes), htmlData.count)
+      } else if let rawHTML = htmlData.utf8PrefixString(maxBytes: maxBytes) {
+        let stripped = rawHTML.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        return (stripped, htmlData.count)
+      }
+    }
+
+    return (title, title.utf8.count)
+  }
+
+  var previewableText: String {
+    previewableTextPrefix(maxBytes: 40_000).text
   }
 
   var fileURLs: [URL] {
@@ -167,7 +407,7 @@ class HistoryItem {
 
   var htmlData: Data? { contentData([.html]) }
   var html: NSAttributedString? {
-    guard let data = htmlData else {
+    guard let data = htmlData, data.count <= 131_072 else {
       return nil
     }
 
@@ -198,7 +438,7 @@ class HistoryItem {
 
   var rtfData: Data? { contentData([.rtf]) }
   var rtf: NSAttributedString? {
-    guard let data = rtfData else {
+    guard let data = rtfData, data.count <= 262_144 else {
       return nil
     }
 

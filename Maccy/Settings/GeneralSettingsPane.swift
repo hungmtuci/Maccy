@@ -46,6 +46,12 @@ struct GeneralSettingsPane: View {
           .accessibilityLabel(Text("Open", tableName: "GeneralSettings"))
       }
 
+      Settings.Section(label: { Text("Dán Plain Text:") }) {
+        KeyboardShortcuts.Recorder(for: .pasteLatestPlainText)
+          .help("Dán ngay nội dung copy gần nhất dưới dạng văn bản thuần không định dạng (Mặc định: ⇧⌘C)")
+          .accessibilityLabel(Text("Dán Plain Text gần nhất"))
+      }
+
       Settings.Section(label: { Text("Pin", tableName: "GeneralSettings") }) {
         KeyboardShortcuts.Recorder(for: .pin)
           .help(Text("PinTooltip", tableName: "GeneralSettings"))
@@ -120,9 +126,4 @@ struct GeneralSettingsPane: View {
     pasteModifier = HistoryItemAction.paste.modifierFlags.description
     pasteWithoutFormatting = HistoryItemAction.pasteWithoutFormatting.modifierFlags.description
   }
-}
-
-#Preview {
-  GeneralSettingsPane()
-    .environment(\.locale, .init(identifier: "en"))
 }

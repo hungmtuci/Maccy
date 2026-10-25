@@ -87,8 +87,3 @@ struct IgnoreApplicationsSettingsView: View {
     ignoredApps.removeAll(where: { $0 == app })
   }
 }
-
-#Preview {
-  IgnoreApplicationsSettingsView()
-    .environment(\.locale, .init(identifier: "en"))
-}

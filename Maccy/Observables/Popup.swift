@@ -195,21 +195,21 @@ class Popup {
     return event
   }
 
-  private func isHotKeyCode(_ keyCode: Int) -> Bool {
-    guard let shortcut = KeyboardShortcuts.Name.popup.shortcut else {
-      return false
-    }
+  private var activePopupShortcuts: [KeyboardShortcuts.Shortcut] {
+    [
+      KeyboardShortcuts.Name.popup.shortcut
+    ].compactMap { $0 }
+  }
 
-    return shortcut.key?.rawValue == keyCode
+  private func isHotKeyCode(_ keyCode: Int) -> Bool {
+    return activePopupShortcuts.contains { $0.key?.rawValue == keyCode }
   }
 
   private func isHotKeyModifiers(_ modifiers: NSEvent.ModifierFlags) -> Bool {
-    guard let shortcut = KeyboardShortcuts.Name.popup.shortcut else {
-      return false
+    let masked = modifiers.intersection(.deviceIndependentFlagsMask)
+    return activePopupShortcuts.contains {
+      masked == $0.modifiers.intersection(.deviceIndependentFlagsMask)
     }
-
-    return modifiers.intersection(.deviceIndependentFlagsMask) ==
-      shortcut.modifiers.intersection(.deviceIndependentFlagsMask)
   }
 
   private func allModifiersReleased(_ event: NSEvent) -> Bool {

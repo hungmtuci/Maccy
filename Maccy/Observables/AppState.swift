@@ -8,7 +8,7 @@ import SwiftUI
 class AppState: Sendable {
   static let shared = AppState(history: History.shared, footer: Footer())
 
-  let multiSelectionEnabled = false
+  let multiSelectionEnabled = true
 
   var appDelegate: AppDelegate?
   var popup: Popup
@@ -16,10 +16,13 @@ class AppState: Sendable {
   var footer: Footer
   var navigator: NavigationManager
   var preview: SlideoutController
+  var cloudSync: CloudSyncManager { CloudSyncManager.shared }
 
   var isEditingItem: Bool = false
+  var isShowingModalPanel: Bool = false
   var suppressPopupAutoClose: Bool {
-    return navigator.isDragAndDropInProgress || isEditingItem
+    get { navigator.isDragAndDropInProgress || isEditingItem || isShowingModalPanel }
+    set { isShowingModalPanel = newValue }
   }
 
   var searchVisible: Bool {
@@ -31,7 +34,7 @@ class AppState: Sendable {
   }
 
   var menuIconText: String {
-    var title = history.firstUnpinnedItem?.text.shortened(to: 100)
+    var title = history.firstUnpinnedItem?.title.shortened(to: 100)
       .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     title.unicodeScalars.removeAll(where: CharacterSet.newlines.contains)
     return title.shortened(to: 20)
@@ -66,7 +69,6 @@ class AppState: Sendable {
         history.select(navigator.selection.first, flags: modifierFlags)
       }
     } else if let item = footer.selectedItem {
-      // TODO: Use item.suppressConfirmation, but it's not updated!
       if item.confirmation != nil, Defaults[.suppressClearAlert] == false {
         item.showConfirmation = true
       } else {
@@ -84,6 +86,22 @@ class AppState: Sendable {
       navigator.selection.forEach { _, item in
         history.togglePin(item)
       }
+    }
+  }
+
+  @MainActor
+  func toggleSync() {
+    let selectedItems = navigator.selection.items
+    guard !selectedItems.isEmpty else { return }
+    withTransaction(Transaction()) {
+      CloudSyncManager.shared.toggleSync(for: selectedItems)
+    }
+  }
+
+  @MainActor
+  func toggleSyncFilter() {
+    withAnimation(.easeInOut(duration: 0.15)) {
+      CloudSyncManager.shared.filterOnlySynced.toggle()
     }
   }
 
@@ -116,9 +134,10 @@ class AppState: Sendable {
       let generalTitle = NSLocalizedString("Title", tableName: "GeneralSettings", comment: "")
       let storageTitle = NSLocalizedString("Title", tableName: "StorageSettings", comment: "")
       let appearanceTitle = NSLocalizedString("Title", tableName: "AppearanceSettings", comment: "")
+      let syncTitle = "Google Drive"
       let ignoreTitle = NSLocalizedString("Title", tableName: "IgnoreSettings", comment: "")
       let advancedTitle = NSLocalizedString("Title", tableName: "AdvancedSettings", comment: "")
-      let toolbarTitles = [generalTitle, storageTitle, appearanceTitle, ignoreTitle, advancedTitle]
+      let toolbarTitles = [generalTitle, storageTitle, appearanceTitle, syncTitle, ignoreTitle, advancedTitle]
       let titleAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
       let titleWidth = toolbarTitles.reduce(CGFloat.zero) {
         $0 + ($1 as NSString).size(withAttributes: titleAttributes).width
@@ -126,7 +145,7 @@ class AppState: Sendable {
       let toolbarItemSpacing: CGFloat = 24
       let toolbarEdgeSpacing: CGFloat = 40
       let toolbarWidth = titleWidth + CGFloat(toolbarTitles.count) * toolbarItemSpacing + toolbarEdgeSpacing
-      let minimumWidth = max(500, ceil(toolbarWidth))
+      let minimumWidth = max(540, ceil(toolbarWidth))
       settingsWindowController = SettingsWindowController(
         panes: [
           Settings.Pane(
@@ -151,6 +170,14 @@ class AppState: Sendable {
             toolbarIcon: NSImage.paintpalette!
           ) {
             AppearanceSettingsPane()
+              .frame(minWidth: minimumWidth)
+          },
+          Settings.Pane(
+            identifier: Settings.PaneIdentifier.sync,
+            title: syncTitle,
+            toolbarIcon: NSImage.icloud!
+          ) {
+            SyncSettingsPane()
               .frame(minWidth: minimumWidth)
           },
           Settings.Pane(

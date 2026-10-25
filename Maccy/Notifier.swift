@@ -5,6 +5,7 @@ class Notifier {
   nonisolated private static var center: UNUserNotificationCenter { UNUserNotificationCenter.current() }
 
   static func authorize() {
+    guard Bundle.main.bundleIdentifier != nil else { return }
     center.requestAuthorization(options: [.alert, .sound]) { _, error in
       if error != nil {
         NSLog("Failed to authorize notifications: \(String(describing: error))")
@@ -13,7 +14,7 @@ class Notifier {
   }
 
   static func notify(body: String?, sound: NSSound?) {
-    guard let body else { return }
+    guard let body, Bundle.main.bundleIdentifier != nil else { return }
 
     authorize()
 

@@ -6,4 +6,5 @@ extension Settings.PaneIdentifier {
   static let general = Self("general")
   static let ignore = Self("ignore")
   static let storage = Self("storage")
+  static let sync = Self("sync")
 }

@@ -42,8 +42,3 @@ struct AdvancedSettingsPane: View {
     .padding()
   }
 }
-
-#Preview {
-  AdvancedSettingsPane()
-    .environment(\.locale, .init(identifier: "en"))
-}

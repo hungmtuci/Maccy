@@ -26,7 +26,7 @@ struct HistoryItemView: View {
   @Environment(AppState.self) private var appState
 
   private var colorSwatchImage: NSImage? {
-    guard showHexColorSwatch else { return nil }
+    guard showHexColorSwatch, item.title.count <= 32 else { return nil }
     return ColorImage.from(item.title)
   }
 
@@ -51,6 +51,10 @@ struct HistoryItemView: View {
       attributedTitle: item.attributedTitle,
       shortcuts: item.shortcuts,
       isSelected: item.isSelected,
+      isSynced: item.isSynced,
+      onToggleSync: {
+        CloudSyncManager.shared.toggleSync(for: [item])
+      },
       selectionIndex: item.multiSelectionIndex,
       selectionAppearance: selectionAppearance,
       accessibilityLabel: item.accessibilityLabel
@@ -59,6 +63,43 @@ struct HistoryItemView: View {
     }
     .accessibilityIdentifier("copy-history-item")
     .buttonAction(performSelect)
+    .contextMenu {
+      Button {
+        if item.isSelected && appState.navigator.selection.count > 1 {
+          appState.toggleSync()
+        } else {
+          CloudSyncManager.shared.toggleSync(for: [item])
+        }
+      } label: {
+        Label(
+          item.isSynced ? "Bỏ đồng bộ Google Drive (⌥S)" : "Đồng bộ lên Google Drive (⌥S)",
+          systemImage: item.isSynced ? "icloud.slash" : "icloud.and.arrow.up"
+        )
+      }
+
+      Button {
+        appState.history.togglePin(item)
+      } label: {
+        Label(
+          item.isPinned ? "Bỏ ghim (⌥P)" : "Ghim (⌥P)",
+          systemImage: item.isPinned ? "pin.slash" : "pin"
+        )
+      }
+
+      Divider()
+
+      Button {
+        appState.history.select(item, flags: [])
+      } label: {
+        Label("Sao chép / Dán", systemImage: "doc.on.doc")
+      }
+
+      Button(role: .destructive) {
+        appState.history.delete(item)
+      } label: {
+        Label("Xóa (⌥⌫)", systemImage: "trash")
+      }
+    }
     .onAppear {
       item.ensureThumbnailImage()
     }

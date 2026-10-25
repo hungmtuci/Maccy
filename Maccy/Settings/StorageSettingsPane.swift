@@ -58,6 +58,7 @@ struct StorageSettingsPane: View {
 
   @Default(.size) private var size
   @Default(.sortBy) private var sortBy
+  @Default(.maxItemSizeMB) private var maxItemSizeMB
 
   @State private var viewModel = ViewModel()
   @State private var storageSize = Storage.shared.size
@@ -66,6 +67,13 @@ struct StorageSettingsPane: View {
     let formatter = NumberFormatter()
     formatter.minimum = 1
     formatter.maximum = 999
+    return formatter
+  }()
+
+  private let maxMBFormatter: NumberFormatter = {
+    let formatter = NumberFormatter()
+    formatter.minimum = 0
+    formatter.maximum = 500
     return formatter
   }()
 
@@ -111,6 +119,24 @@ struct StorageSettingsPane: View {
         }
       }
 
+      Settings.Section(label: { Text("Giới hạn mỗi mục:") }) {
+        VStack(alignment: .leading, spacing: 4) {
+          HStack {
+            TextField("", value: $maxItemSizeMB, formatter: maxMBFormatter)
+              .frame(width: 80)
+            Stepper("", value: $maxItemSizeMB, in: 0...500, step: 5)
+              .labelsHidden()
+            Text(maxItemSizeMB == 0 ? "MB (0 = Không giới hạn)" : "MB")
+              .controlSize(.small)
+              .foregroundStyle(.gray)
+          }
+          Text("Mặc định (0) giữ 100% dữ liệu gốc khi Paste và tự động cắt ngắn Preview/Title để chống treo máy.")
+            .controlSize(.small)
+            .foregroundStyle(.gray)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+
       Settings.Section(label: { Text("SortBy", tableName: "StorageSettings") }) {
         Picker("", selection: $sortBy) {
           ForEach(Sorter.By.allCases) { mode in
@@ -124,9 +150,4 @@ struct StorageSettingsPane: View {
       }
     }
   }
-}
-
-#Preview {
-  StorageSettingsPane()
-    .environment(\.locale, .init(identifier: "en"))
 }

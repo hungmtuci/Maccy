@@ -65,8 +65,3 @@ struct IgnorePasteboardTypesSettingsView: View {
     ignoredPasteboardTypes.remove(type)
   }
 }
-
-#Preview {
-  IgnorePasteboardTypesSettingsView()
-    .environment(\.locale, .init(identifier: "en"))
-}

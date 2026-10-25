@@ -3,14 +3,12 @@ import KeyboardShortcuts
 import SwiftUI
 
 private struct KeyboardShortcutHelpModifier: ViewModifier {
-  // A nil name produces help text without a keyboard shortcut substitution.
   let name: KeyboardShortcuts.Name?
   let key: String
   let tableName: String
   let comment: String = ""
   let replacementKey: String
 
-  // Use the same localized description for visual help and the accessibility label.
   private var resolvedText: Text? {
     let localized = NSLocalizedString(key, tableName: tableName, comment: comment)
     guard let name else {
@@ -35,7 +33,7 @@ private struct KeyboardShortcutHelpModifier: ViewModifier {
 
 struct ToolbarButton<Label: View>: View {
   let action: @MainActor () -> Void
-  let label: () -> Label
+  @ViewBuilder let label: () -> Label
 
   var body: some View {
     Button(action: action) {
@@ -61,7 +59,6 @@ struct ToolbarButton<Label: View>: View {
       )
     )
   }
-
 }
 
 struct ToolbarView: View {
@@ -76,6 +73,11 @@ struct ToolbarView: View {
 
   private var shouldUnpin: Bool {
     return appState.navigator.selection.items.allSatisfy { $0.isPinned }
+  }
+
+  private var allSelectedSynced: Bool {
+    return !appState.navigator.selection.isEmpty &&
+      appState.navigator.selection.items.allSatisfy { $0.isSynced }
   }
 
   private var pinActionDisabled: Bool {
@@ -128,6 +130,20 @@ struct ToolbarView: View {
           .shortcutKeyHelp(key: "CopyExtractedText", tableName: "PreviewItemView")
           .disabled(selectedImageText == nil)
         }
+
+        ToolbarButton {
+          withAnimation {
+            appState.toggleSync()
+          }
+        } label: {
+          if allSelectedSynced {
+            Image(systemName: "icloud.fill")
+              .foregroundStyle(.blue)
+          } else {
+            Image(systemName: "icloud.and.arrow.up")
+          }
+        }
+        .help(allSelectedSynced ? "Bỏ đồng bộ Google Drive (⌥S)" : "Đồng bộ mục đang chọn lên Google Drive (⌥S)")
 
         ToolbarButton {
           withAnimation {

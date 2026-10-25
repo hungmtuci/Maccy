@@ -1,11 +1,14 @@
 import AppKit
+import ApplicationServices
 
 struct Accessibility {
-  private static var allowed: Bool { AXIsProcessTrustedWithOptions(nil) }
+  static var allowed: Bool { AXIsProcessTrustedWithOptions(nil) }
 
   static func check() {
     guard !allowed else {
       return
     }
+    let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+    _ = AXIsProcessTrustedWithOptions(options)
   }
 }

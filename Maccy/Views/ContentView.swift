@@ -86,9 +86,3 @@ struct ContentView: View {
     }
   }
 }
-
-#Preview {
-  ContentView()
-    .environment(\.locale, .init(identifier: "en"))
-    .modelContainer(Storage.shared.container)
-}

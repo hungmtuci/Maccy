@@ -13,12 +13,36 @@ struct HeaderView: View {
 
   var body: some View {
     HStack(alignment: .top, spacing: 0) {
-      HStack(alignment: .center, spacing: 0) {
+      HStack(alignment: .center, spacing: 4) {
         ListHeaderView(
           searchFocused: $searchFocused,
           searchQuery: $appState.history.searchQuery
         )
-        .padding(.horizontal, Popup.horizontalPadding)
+        .padding(.leading, Popup.horizontalPadding)
+
+        ToolbarButton {
+          appState.toggleSyncFilter()
+        } label: {
+          HStack(spacing: 2) {
+            Image(
+              systemName: appState.cloudSync.filterOnlySynced
+                ? "icloud.fill" : "icloud"
+            )
+            .foregroundStyle(appState.cloudSync.filterOnlySynced ? Color.accentColor : Color.primary)
+            if appState.cloudSync.syncedCount > 0 {
+              Text("\(appState.cloudSync.syncedCount)")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(appState.cloudSync.filterOnlySynced ? Color.accentColor : Color.secondary)
+            }
+          }
+          .padding(.horizontal, 4)
+          .padding(.vertical, 2)
+          .background(
+            RoundedRectangle(cornerRadius: 4)
+              .fill(appState.cloudSync.filterOnlySynced ? Color.accentColor.opacity(0.15) : Color.clear)
+          )
+        }
+        .help("Lọc các mục đồng bộ Google Drive (⌥⌘S). Nhấn ⌥S để đánh dấu đồng bộ mục đang chọn.")
 
         ToolbarButton {
           controller.togglePreview()

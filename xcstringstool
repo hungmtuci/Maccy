@@ -1,0 +1,22 @@
+#!/bin/bash
+cmd="$1"
+outdir=""
+xcstrings=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--output-directory" ]]; then
+    outdir="$arg"
+  elif [[ "$arg" == *.xcstrings ]]; then
+    xcstrings="$arg"
+  fi
+  prev="$arg"
+done
+
+if [[ -n "$outdir" ]]; then
+  mkdir -p "$outdir"
+  if [[ "$cmd" == "generate-symbols" && -n "$xcstrings" ]]; then
+    base="$(basename "$xcstrings" .xcstrings)"
+    echo "import Foundation" > "$outdir/GeneratedStringSymbols_${base}.swift"
+  fi
+fi
+exit 0

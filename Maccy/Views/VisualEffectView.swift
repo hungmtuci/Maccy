@@ -30,10 +30,3 @@ struct GlassEffectView: NSViewRepresentable {
     glassEffectView.style = style
   }
 }
-
-#Preview {
-  VisualEffectView(
-    material: .popover,
-    blendingMode: .behindWindow
-  )
-}

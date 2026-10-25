@@ -1,6 +1,8 @@
 import Defaults
 import KeyboardShortcuts
+#if canImport(Sparkle)
 import Sparkle
+#endif
 import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -38,11 +40,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationWillFinishLaunching(_ notification: Notification) { // swiftlint:disable:this function_body_length
     #if DEBUG
     if Self.isTesting {
+      #if canImport(Sparkle)
       SPUUpdater(hostBundle: Bundle.main,
                  applicationBundle: Bundle.main,
                  userDriver: SPUStandardUserDriver(hostBundle: Bundle.main, delegate: nil),
                  delegate: nil)
       .automaticallyChecksForUpdates = false
+      #endif
       // Start from a clean slate for the isolated testing preferences.
       UserDefaults.standard.removePersistentDomain(forName: Defaults.Keys.testingSuiteName)
     }
@@ -110,6 +114,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     migrateUserDefaults()
     disableUnusedGlobalHotkeys()
 
+    KeyboardShortcuts.onKeyDown(for: .pasteLatestPlainText) {
+      Clipboard.shared.pasteLatestPlainText()
+    }
+
     panel = FloatingPanel(
       contentRect: NSRect(origin: .zero, size: Defaults[.windowSize]),
       identifier: Bundle.main.bundleIdentifier ?? "org.p0deje.Maccy",
@@ -173,6 +181,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       _ = try? Storage.shared.removeUnpersistableContents()
     }
 
+    ensureMigration(key: "2026-10-21-default-popup-cmd-shift-v") {
+      KeyboardShortcuts.Name.popup.shortcut = KeyboardShortcuts.Shortcut(.v, modifiers: [.command, .shift])
+    }
+
+    ensureMigration(key: "2026-10-25-default-cmd-shift-c-plain-text") {
+      UserDefaults.standard.removeObject(forKey: "KeyboardShortcuts_popupLegacy")
+      if KeyboardShortcuts.Name.popup.shortcut == KeyboardShortcuts.Shortcut(.c, modifiers: [.command, .shift]) {
+        KeyboardShortcuts.Name.popup.shortcut = KeyboardShortcuts.Shortcut(.v, modifiers: [.command, .shift])
+      }
+      KeyboardShortcuts.Name.pasteLatestPlainText.shortcut = KeyboardShortcuts.Shortcut(.c, modifiers: [.command, .shift])
+    }
+
     // The following defaults are not used in Maccy 2.x
     // and should be removed in 3.x.
     // - LaunchAtLogin__hasMigrated
@@ -215,7 +235,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func disableUnusedGlobalHotkeys() {
-    let names: [KeyboardShortcuts.Name] = [.delete, .pin, .togglePreview]
+    let names: [KeyboardShortcuts.Name] = [.delete, .pin, .togglePreview, .sync]
     KeyboardShortcuts.disable(names)
 
     NotificationCenter.default.addObserver(

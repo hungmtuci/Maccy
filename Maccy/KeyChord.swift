@@ -20,6 +20,9 @@ enum KeyChord: CaseIterable {
   static var previewKey: Key? { Sauce.shared.key(shortcut: .togglePreview) }
   static var previewModifiers: NSEvent.ModifierFlags? { KeyboardShortcuts.Shortcut(name: .togglePreview)?.modifiers }
 
+  static var syncKey: Key? { Sauce.shared.key(shortcut: .sync) }
+  static var syncModifiers: NSEvent.ModifierFlags? { KeyboardShortcuts.Shortcut(name: .sync)?.modifiers }
+
   case clearHistory
   case clearHistoryAll
   case clearSearch
@@ -37,6 +40,8 @@ enum KeyChord: CaseIterable {
   case extendToFirst
   case openPreferences
   case pinOrUnpin
+  case syncOrUnsync
+  case toggleSyncFilter
   case selectCurrentItem
   case close
   case togglePreview
@@ -104,7 +109,6 @@ enum KeyChord: CaseIterable {
          (.p, [.control]):
       self = .moveToPrevious
     case (.k, [.control]) where !AppState.shared.navigator.isFirstItemHighlighted:
-      // See https://github.com/p0deje/Maccy/issues/1055
       self = .moveToPrevious
     case (.upArrow, [.command, .shift]),
          (.upArrow, [.option, .shift]),
@@ -116,6 +120,10 @@ enum KeyChord: CaseIterable {
       self = .moveToFirst
     case (KeyChord.pinKey, KeyChord.pinModifiers):
       self = .pinOrUnpin
+    case (KeyChord.syncKey, KeyChord.syncModifiers):
+      self = .syncOrUnsync
+    case (.s, [.command, .option]):
+      self = .toggleSyncFilter
     case (.comma, [.command]):
       self = .openPreferences
     case (.return, _),

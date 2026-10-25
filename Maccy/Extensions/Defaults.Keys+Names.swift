@@ -76,4 +76,13 @@ nonisolated extension Defaults.Keys {
   static let showApplicationIcons = Key<Bool>("showApplicationIcons", default: false, suite: preferencesSuite)
   static let showHexColorSwatch = Key<Bool>("showHexColorSwatch", default: true, suite: preferencesSuite)
   static let previewWidth = Key<CGFloat>("previewWidth", default: 400, suite: preferencesSuite)
+  static let maxItemSizeMB = Key<Int>("maxItemSizeMB", default: 0, suite: preferencesSuite)
+  static let cloudSyncEnabled = Key<Bool>("cloudSyncEnabled", default: true, suite: preferencesSuite)
+  static let cloudSyncFolderPath = Key<String>("cloudSyncFolderPath", default: "", suite: preferencesSuite)
+  static let autoSyncPinnedItems = Key<Bool>("autoSyncPinnedItems", default: true, suite: preferencesSuite)
+  static let syncedItemHashes = Key<Set<String>>("syncedItemHashes", default: [], suite: preferencesSuite)
+  static let lastCloudSyncAt = Key<Date?>("lastCloudSyncAt", default: nil, suite: preferencesSuite)
+  static let cloudSyncEncryptionEnabled = Key<Bool>("cloudSyncEncryptionEnabled", default: false, suite: preferencesSuite)
+  static let cloudSyncPassphrase = Key<String>("cloudSyncPassphrase", default: "", suite: preferencesSuite)
+  static let warnBeforeSyncingSecrets = Key<Bool>("warnBeforeSyncingSecrets", default: true, suite: preferencesSuite)
 }

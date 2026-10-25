@@ -1,5 +1,6 @@
 import AppKit
 import Defaults
+import KeyboardShortcuts
 import Sauce
 
 class Clipboard {
@@ -33,6 +34,10 @@ class Clipboard {
     .appleWebArchive,
     .safariWebArchve
   ]
+
+  // When plain text (.string) is already present, cap redundant HTML/RTF styling blobs at 5 MB
+  // so copying large logs/code from IDEs or browsers doesn't dump 50+ MB of HTML into SQLite.
+  private let maxRedundantRichTextBytes = 5 * 1_048_576
 
   private var enabledTypes: Set<NSPasteboard.PasteboardType> { Defaults[.enabledPasteboardTypes] }
   private var disabledTypes: Set<NSPasteboard.PasteboardType> { supportedTypes.subtracting(enabledTypes) }
@@ -97,9 +102,6 @@ class Clipboard {
       pasteboard.setData(content.value, forType: NSPasteboard.PasteboardType(content.type))
     }
 
-    // Use writeObjects for file URLs so that multiple files that are copied actually work.
-    // Only do this for file URLs because it causes an issue with some other data types (like formatted text)
-    // where the item is pasted more than once.
     let fileURLItems: [NSPasteboardItem] = contents.compactMap { item in
       guard item.type == NSPasteboard.PasteboardType.fileURL.rawValue else { return nil }
       guard let value = item.value else { return nil }
@@ -119,24 +121,128 @@ class Clipboard {
     }
   }
 
-  // Based on https://github.com/Clipy/Clipy/blob/develop/Clipy/Sources/Services/PasteService.swift.
-  func paste() {
+  @MainActor
+  func pasteLatestPlainText() {
+    // Capture any copy made within the last few milliseconds before the timer tick
+    checkForChangesInPasteboard()
+
+    let wasPopupOpen = !AppState.shared.popup.isClosed()
+    if wasPopupOpen {
+      AppState.shared.popup.close()
+    }
+
+    let latestItem = History.shared.mostRecentItem
+    guard let plainTextData = extractPlainTextData(from: latestItem), !plainTextData.isEmpty else {
+      return
+    }
+
+    pasteboard.clearContents()
+    pasteboard.setData(plainTextData, forType: .string)
+    pasteboard.setString("", forType: .fromMaccy)
+    if let app = latestItem?.application {
+      pasteboard.setString(app, forType: .source)
+    }
+    // Advance changeCount so we keep the original rich HistoryItem intact in Maccy's history
+    changeCount = pasteboard.changeCount
+    sync()
+
+    // Temporarily disable .popup (⌘⇧V) so synthetic ⌘V while user holds Shift never triggers popup
+    KeyboardShortcuts.disable(.popup)
+    let pasteDelay: TimeInterval = wasPopupOpen ? 0.05 : 0.02
+    DispatchQueue.main.asyncAfter(deadline: .now() + pasteDelay) {
+      self.postCleanCommandVPaste()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        if AppState.shared.popup.isClosed() {
+          KeyboardShortcuts.enable(.popup)
+        }
+      }
+    }
+  }
+
+  private func postCleanCommandVPaste() {
     Accessibility.check()
 
-    // Add flag that left/right modifier key has been pressed.
-    // See https://github.com/TermiT/Flycut/pull/18 for details.
     let cmdFlag = CGEventFlags(rawValue: UInt64(KeyChord.pasteKeyModifiers.rawValue) | 0x000008)
     var vCode = Sauce.shared.keyCode(for: KeyChord.pasteKey)
 
-    // Force QWERTY keycode when keyboard layout switches to
-    // QWERTY upon pressing ⌘ key (e.g. "Dvorak - QWERTY ⌘").
-    // See https://github.com/p0deje/Maccy/issues/482 for details.
+    if KeyboardLayout.current.commandSwitchesToQWERTY && cmdFlag.contains(.maskCommand) {
+      vCode = KeyChord.pasteKey.QWERTYKeyCode
+    }
+
+    // Use .privateState so physical Shift key from ⌘⇧C does not leak into the synthetic ⌘V event
+    let source = CGEventSource(stateID: .privateState)
+    source?.setLocalEventsFilterDuringSuppressionState(
+      [.permitLocalMouseEvents, .permitSystemDefinedEvents],
+      state: .eventSuppressionStateSuppressionInterval
+    )
+
+    let keyVDown = CGEvent(keyboardEventSource: source, virtualKey: vCode, keyDown: true)
+    let keyVUp = CGEvent(keyboardEventSource: source, virtualKey: vCode, keyDown: false)
+    keyVDown?.flags = cmdFlag
+    keyVUp?.flags = cmdFlag
+    keyVDown?.post(tap: .cgSessionEventTap)
+    keyVUp?.post(tap: .cgSessionEventTap)
+  }
+
+  private func extractPlainTextData(from item: HistoryItem?) -> Data? {
+    if let item {
+      // 1. Direct UTF-8 plain text (preserves 100% of even multi-MB text in O(1))
+      if let stringContent = item.contents.first(where: { NSPasteboard.PasteboardType($0.type) == .string }),
+         let data = stringContent.value,
+         !data.isEmpty {
+        return data
+      }
+
+      // 2. Convert RTF to plain text if plain .string wasn't provided by source app
+      if let rtfData = item.rtfData,
+         let attr = NSAttributedString(rtf: rtfData, documentAttributes: nil),
+         !attr.string.isEmpty,
+         let data = attr.string.data(using: .utf8) {
+        return data
+      }
+
+      // 3. Convert HTML to plain text if plain .string wasn't provided
+      if let htmlData = item.htmlData,
+         let attr = NSAttributedString(html: htmlData, documentAttributes: nil),
+         !attr.string.isEmpty,
+         let data = attr.string.data(using: .utf8) {
+        return data
+      }
+
+      // 4. File URLs -> plain file paths
+      if !item.fileURLs.isEmpty {
+        let joined = item.fileURLs
+          .map { $0.isFileURL ? $0.path : $0.absoluteString }
+          .joined(separator: "\n")
+        if let data = joined.data(using: .utf8), !data.isEmpty {
+          return data
+        }
+      }
+
+      // 5. OCR text from copied image (if available)
+      if !item.title.isEmpty, let data = item.title.data(using: .utf8) {
+        return data
+      }
+    }
+
+    // Fallback directly to system pasteboard plain text
+    if let pbData = pasteboard.data(forType: .string), !pbData.isEmpty {
+      return pbData
+    }
+    return nil
+  }
+
+  func paste() {
+    Accessibility.check()
+
+    let cmdFlag = CGEventFlags(rawValue: UInt64(KeyChord.pasteKeyModifiers.rawValue) | 0x000008)
+    var vCode = Sauce.shared.keyCode(for: KeyChord.pasteKey)
+
     if KeyboardLayout.current.commandSwitchesToQWERTY && cmdFlag.contains(.maskCommand) {
       vCode = KeyChord.pasteKey.QWERTYKeyCode
     }
 
     let source = CGEventSource(stateID: .combinedSessionState)
-    // Disable local keyboard events while pasting
     source?.setLocalEventsFilterDuringSuppressionState([.permitLocalMouseEvents, .permitSystemDefinedEvents],
                                                        state: .eventSuppressionStateSuppressionInterval)
 
@@ -166,8 +272,6 @@ class Clipboard {
     changeCount = pasteboard.changeCount
 
     if pasteboard.pasteboardItems?.contains(where: { $0.types.contains(.fromMaccy) }) != true {
-      // External copy occurred. Stop the current paste stack.
-      // Maybe queue it into the paste stack? Configurable behaviour?
       AppState.shared.history.interruptPasteStack()
     }
 
@@ -180,9 +284,6 @@ class Clipboard {
       return
     }
 
-    // Reading types on NSPasteboard gives all the available
-    // types - even the ones that are not present on the NSPasteboardItem.
-    // See https://github.com/p0deje/Maccy/issues/241.
     if shouldIgnore(Set(pasteboard.types ?? [])) {
       return
     }
@@ -191,10 +292,9 @@ class Clipboard {
       return
     }
 
-    // Some applications (BBEdit, Edge) add 2 items to pasteboard when copying
-    // so it's better to merge all data into a single record.
-    // - https://github.com/p0deje/Maccy/issues/78
-    // - https://github.com/p0deje/Maccy/issues/472
+    let maxLimitMB = Defaults[.maxItemSizeMB]
+    let maxBytesLimit = maxLimitMB > 0 ? maxLimitMB * 1_048_576 : Int.max
+
     var contents = [HistoryItemContent]()
     pasteboard.pasteboardItems?.forEach({ item in
       var types = Set(item.types)
@@ -210,15 +310,30 @@ class Clipboard {
         .subtracting(disabledTypes)
         .filter(isPersistable)
 
-      // Avoid reading Microsoft Word links from bookmarks and cross-references.
-      // https://github.com/p0deje/Maccy/issues/613
-      // https://github.com/p0deje/Maccy/issues/770
       if types.isSuperset(of: [.microsoftLinkSource, .microsoftObjectLink]) {
         types = types.subtracting([.microsoftLinkSource, .microsoftObjectLink, .pdf])
       }
 
+      let hasPlainString = types.contains(.string)
+
       types.forEach { type in
-        contents.append(HistoryItemContent(type: type.rawValue, value: item.data(forType: type)))
+        guard let data = item.data(forType: type) else { return }
+
+        // Skip redundant multi-megabyte HTML/RTF styling blobs when plain text is already captured
+        if hasPlainString && (type == .html || type == .rtf) && data.count > maxRedundantRichTextBytes {
+          return
+        }
+
+        if data.count > maxBytesLimit {
+          // If user configured a max size limit and this is plain text, keep UTF-8 prefix up to maxBytesLimit
+          if type == .string,
+             let truncated = data.utf8PrefixString(maxBytes: maxBytesLimit)?.data(using: .utf8) {
+            contents.append(HistoryItemContent(type: type.rawValue, value: truncated))
+          }
+          return
+        }
+
+        contents.append(HistoryItemContent(type: type.rawValue, value: data))
       }
     })
 
@@ -229,7 +344,6 @@ class Clipboard {
     let historyItem = HistoryItem(contents: contents)
 
     if #unavailable(macOS 15.0) {
-      // On macOS 14 the history item needs to be inserted into storage directly after creating it.
       try? History.shared.insertIntoStorage(historyItem)
     }
 
@@ -256,37 +370,47 @@ class Clipboard {
   }
 
   private func shouldIgnore(_ item: NSPasteboardItem) -> Bool {
+    guard !Defaults[.ignoreRegexp].isEmpty else { return false }
+    guard let data = item.data(forType: .string),
+          let sample = data.utf8PrefixString(maxBytes: 16_384),
+          !sample.isEmpty else {
+      return false
+    }
+
     for regexp in Defaults[.ignoreRegexp] {
-      if let string = item.string(forType: .string) {
-        do {
-          let regex = try NSRegularExpression(pattern: regexp)
-          if regex.numberOfMatches(in: string, range: NSRange(string.startIndex..., in: string)) > 0 {
-            return true
-          }
-        } catch {
-          return false
+      do {
+        let regex = try NSRegularExpression(pattern: regexp)
+        if regex.numberOfMatches(in: sample, range: NSRange(sample.startIndex..., in: sample)) > 0 {
+          return true
         }
+      } catch {
+        return false
       }
     }
     return false
   }
 
   private func isEmptyString(_ item: NSPasteboardItem) -> Bool {
-    guard let string = item.string(forType: .string) else {
+    guard let data = item.data(forType: .string) else {
       return true
     }
-
-    return string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    return data.isEffectivelyEmptyUTF8
   }
 
   private func richText(_ item: NSPasteboardItem) -> Bool {
-    if let rtf = item.data(forType: .rtf) {
+    if let rtf = item.data(forType: .rtf), !rtf.isEmpty {
+      if rtf.count > 262_144 {
+        return true
+      }
       if let attributedString = NSAttributedString(rtf: rtf, documentAttributes: nil) {
         return !attributedString.string.isEmpty
       }
     }
 
-    if let html = item.data(forType: .html) {
+    if let html = item.data(forType: .html), !html.isEmpty {
+      if html.count > 65_536 {
+        return true
+      }
       if let attributedString = NSAttributedString(html: html, documentAttributes: nil) {
         return !attributedString.string.isEmpty
       }
@@ -295,9 +419,6 @@ class Clipboard {
     return false
   }
 
-  // Some applications requires window be unfocused and focused back to sync the clipboard.
-  // - Chrome Remote Desktop (https://github.com/p0deje/Maccy/issues/948)
-  // - Netbeans (https://github.com/p0deje/Maccy/issues/879)
   private func sync() {
     guard let app = sourceApp,
           app.bundleURL?.lastPathComponent == "Chrome Remote Desktop.app" ||
@@ -313,17 +434,28 @@ class Clipboard {
     var newContents: [HistoryItemContent] = contents
     let stringContents = contents.filter { NSPasteboard.PasteboardType($0.type) == .string }
 
-    // If there is no string representation of data,
-    // behave like we didn't have to remove formatting.
     if !stringContents.isEmpty {
       newContents = stringContents
 
-      // Preserve file URLs.
-      // https://github.com/p0deje/Maccy/issues/962
       let fileURLContents = contents.filter { NSPasteboard.PasteboardType($0.type) == .fileURL }
       if !fileURLContents.isEmpty {
         newContents += fileURLContents
       }
+      return newContents
+    }
+
+    if let rtfContent = contents.first(where: { NSPasteboard.PasteboardType($0.type) == .rtf }),
+       let rtfData = rtfContent.value,
+       let attr = NSAttributedString(rtf: rtfData, documentAttributes: nil),
+       let utf8Data = attr.string.data(using: .utf8) {
+      return [HistoryItemContent(type: NSPasteboard.PasteboardType.string.rawValue, value: utf8Data)]
+    }
+
+    if let htmlContent = contents.first(where: { NSPasteboard.PasteboardType($0.type) == .html }),
+       let htmlData = htmlContent.value,
+       let attr = NSAttributedString(html: htmlData, documentAttributes: nil),
+       let utf8Data = attr.string.data(using: .utf8) {
+      return [HistoryItemContent(type: NSPasteboard.PasteboardType.string.rawValue, value: utf8Data)]
     }
 
     return newContents

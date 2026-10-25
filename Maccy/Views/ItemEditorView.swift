@@ -215,6 +215,11 @@ struct ItemEditorView: View {
         HistoryItemContent(type: stringType, value: data)
       )
     }
+    historyItem.invalidateContentCache()
+    item.invalidatePreviewText()
+    if item.isSynced {
+      CloudSyncManager.shared.setSynced(true, for: [item])
+    }
   }
 
   private func saveChanges() {

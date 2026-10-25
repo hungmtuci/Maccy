@@ -35,22 +35,17 @@ class Storage {
   }
 
   func cleanupOrphanedContents() throws -> Int {
-    let descriptor = FetchDescriptor<HistoryItemContent>(
-      predicate: #Predicate { $0.item == nil }
-    )
-    let count = try context.fetchCount(descriptor)
-    guard count > 0 else {
+    let contents = try context.fetch(FetchDescriptor<HistoryItemContent>())
+    let orphaned = contents.filter { $0.item == nil }
+    guard !orphaned.isEmpty else {
       return 0
     }
 
-    try context.delete(
-      model: HistoryItemContent.self,
-      where: #Predicate { $0.item == nil }
-    )
+    orphaned.forEach(context.delete)
     context.processPendingChanges()
     try context.save()
 
-    return count
+    return orphaned.count
   }
 
   func removeUnpersistableContents() throws -> Int {
@@ -71,10 +66,7 @@ class Storage {
   }
 
   // Titles stored before the sanitization in `HistoryItem.generateTitle()` may
-  // contain scalars that hang CoreText on macOS 26. Such an item makes Maccy
-  // spin at 100% CPU on every launch without ever drawing its window, so the
-  // store has to be healed before the history is first rendered.
-  // See https://github.com/p0deje/Maccy/issues/1520.
+  // contain scalars that hang CoreText on macOS 26.
   func sanitizeTitles() throws -> Int {
     let items = try context.fetch(FetchDescriptor<HistoryItem>())
     var count = 0

@@ -7,6 +7,7 @@ import Sauce
 @Observable
 class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   private static let previewMaxParagraphSize = 10_000
+  private static let previewMaxTotalSize = 32_768
 
   static func == (lhs: HistoryItemDecorator, rhs: HistoryItemDecorator) -> Bool {
     return lhs.id == rhs.id
@@ -25,6 +26,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   var isSelected: Bool {
     return selectionIndex != -1
   }
+  var isSynced: Bool = false
   var shortcuts: [KeyShortcut] = []
 
   var application: String? {
@@ -41,15 +43,72 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return url.deletingPathExtension().lastPathComponent
   }
 
-  var hasImage: Bool { item.image != nil }
+  var hasImage: Bool { item.imageData != nil }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }
-  var hasRichText: Bool { item.rtf != nil || item.html != nil }
+  var hasRichText: Bool { item.rtfData != nil || item.htmlData != nil }
 
   var previewImageGenerationTask: Task<(), Error>?
   var thumbnailImageGenerationTask: Task<(), Error>?
   var previewImage: NSImage?
-  private(set) var previewText = SizedString("")
+
+  @ObservationIgnored
+  private var _cachedPreviewText: SizedString?
+  @ObservationIgnored
+  private var _cachedFoldedTitle: String?
+  @ObservationIgnored
+  private var _cachedFoldedBodyText: String?
+
+  var foldedTitle: String {
+    if let cached = _cachedFoldedTitle {
+      return cached
+    }
+    let folded = title.foldingVietnameseDiacritics
+    _cachedFoldedTitle = folded
+    return folded
+  }
+
+  /// Lazily computed folded body text (up to 64 KB) for deep full-text search in long items.
+  var foldedSearchableBodyText: String {
+    if let cached = _cachedFoldedBodyText {
+      return cached
+    }
+    let extracted = item.previewableTextPrefix(maxBytes: 65_536).text
+    let folded = extracted.foldingVietnameseDiacritics
+    _cachedFoldedBodyText = folded
+    return folded
+  }
+
+  var syncSourceDevice: String? {
+    CloudSyncManager.shared.syncMetadata(for: item.contentHash)?.deviceName
+  }
+
+  var syncUpdatedAt: Date? {
+    CloudSyncManager.shared.syncMetadata(for: item.contentHash)?.updatedAt
+  }
+
+  /// Lazily computed & bounded preview text so loading hundreds of large history items never blocks the main thread.
+  var previewText: SizedString {
+    if let cached = _cachedPreviewText {
+      return cached
+    }
+    let extracted = item.previewableTextPrefix(maxBytes: 40_000)
+    let sized = SizedString(
+      extracted.text,
+      maxParagraphBytes: Self.previewMaxParagraphSize,
+      maxTotalBytes: Self.previewMaxTotalSize,
+      originalByteCount: extracted.totalBytes
+    )
+    _cachedPreviewText = sized
+    return sized
+  }
+
+  func invalidatePreviewText() {
+    _cachedPreviewText = nil
+    _cachedFoldedTitle = nil
+    _cachedFoldedBodyText = nil
+  }
+
   var thumbnailImage: NSImage?
   var applicationImage: ApplicationImage
 
@@ -58,17 +117,26 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     ByteCountFormatter.string(fromByteCount: Int64($0.count), countStyle: .file)
   }
 
-  // 10k characters seems to be more than enough on large displays
-  var text: String { previewText.string.shortened(to: 10_000) }
+  var formattedDataSize: String {
+    ByteCountFormatter.string(fromByteCount: Int64(item.totalByteCount), countStyle: .file)
+  }
+
+  // Bounded text accessor for menu bar icon & quick inspection
+  var text: String {
+    if !title.isEmpty {
+      return title
+    }
+    return previewText.string.shortened(to: 10_000)
+  }
 
   var isPinned: Bool { item.pin != nil }
   var isUnpinned: Bool { item.pin == nil }
 
   func hash(into hasher: inout Hasher) {
-    // We need to hash title and attributedTitle, so SwiftUI knows it needs to update the view if they chage
     hasher.combine(id)
     hasher.combine(title)
     hasher.combine(attributedTitle)
+    hasher.combine(isSynced)
   }
 
   private(set) var item: HistoryItem
@@ -101,6 +169,9 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     if isPinned {
       parts.append(NSLocalizedString("history_item_pinned_accessibility_value", comment: ""))
     }
+    if isSynced {
+      parts.append("Đã đồng bộ Google Drive")
+    }
     if let index = multiSelectionIndex {
       parts.append(
         String(
@@ -113,20 +184,21 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return parts.joined(separator: ", ")
   }
 
+  @MainActor
   init(_ item: HistoryItem, shortcuts: [KeyShortcut] = []) {
     self.item = item
     self.shortcuts = shortcuts
     self.title = item.title
+    self.isSynced = Defaults[.syncedItemHashes].contains(item.contentHash)
     self.applicationImage = ApplicationImageCache.shared.getImage(item: item)
 
     synchronizeItemPin()
     synchronizeItemTitle()
-    synchronizeItemText()
   }
 
   @MainActor
   func ensureThumbnailImage() {
-    guard item.image != nil else {
+    guard item.imageData != nil else {
       return
     }
     guard thumbnailImage == nil else {
@@ -142,7 +214,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
 
   @MainActor
   func ensurePreviewImage() {
-    guard item.image != nil else {
+    guard item.imageData != nil else {
       return
     }
     guard previewImage == nil else {
@@ -174,6 +246,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     previewImage?.recache()
     thumbnailImage = nil
     previewImage = nil
+    _cachedPreviewText = nil
     item.clearDecodedImageCache()
   }
 
@@ -235,8 +308,6 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
         if let pin = self.item.pin {
           self.shortcuts = KeyShortcut.create(character: pin)
         }
-        // History assigns numeric shortcuts when unpinning. Preserve them when
-        // this observation callback runs after the history has been updated.
         self.synchronizeItemPin()
       }
     }
@@ -249,17 +320,10 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
       DispatchQueue.main.async {
         guard let self else { return }
         self.title = self.item.title
+        self._cachedPreviewText = nil
+        self._cachedFoldedTitle = nil
+        self._cachedFoldedBodyText = nil
         self.synchronizeItemTitle()
-      }
-    }
-  }
-
-  private func synchronizeItemText() {
-    previewText = withObservationTracking {
-      SizedString(item.previewableText, maxParagraphBytes: Self.previewMaxParagraphSize)
-    } onChange: { [weak self] in
-      DispatchQueue.main.async { [weak self] in
-        self?.synchronizeItemText()
       }
     }
   }

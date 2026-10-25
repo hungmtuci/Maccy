@@ -10,15 +10,19 @@ enum MenuIcon: String, CaseIterable, Identifiable, Defaults.Serializable {
   var id: Self { self }
 
   var image: NSImage {
+    let resolved: NSImage?
     switch self {
     case .maccy:
-      return NSImage(named: .maccyStatusBar)!
+      resolved = NSImage(named: .maccyStatusBar) ?? NSImage(systemSymbolName: "list.clipboard", accessibilityDescription: "Maccy")
     case .clipboard:
-      return NSImage(named: .clipboard)!
+      resolved = NSImage(named: .clipboard) ?? NSImage(systemSymbolName: "clipboard.fill", accessibilityDescription: "Clipboard")
     case .scissors:
-      return NSImage(named: .scissors)!
+      resolved = NSImage(named: .scissors) ?? NSImage(systemSymbolName: "scissors", accessibilityDescription: "Scissors")
     case .paperclip:
-      return NSImage(named: .paperclip)!
+      resolved = NSImage(named: .paperclip) ?? NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Paperclip")
     }
+    let img = resolved ?? NSImage()
+    img.isTemplate = true
+    return img
   }
 }

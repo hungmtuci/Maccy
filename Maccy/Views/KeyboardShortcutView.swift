@@ -26,16 +26,3 @@ struct KeyboardShortcutView: View {
     .opacity(character.isEmpty ? 0 : 0.7)
   }
 }
-
-#Preview {
-  List {
-    KeyboardShortcutView(shortcut: KeyShortcut(key: .a, modifierFlags: [.command]))
-    KeyboardShortcutView(shortcut: KeyShortcut(key: .w))
-    KeyboardShortcutView(shortcut: KeyShortcut(key: .one, modifierFlags: [.command]))
-    KeyboardShortcutView(shortcut: KeyShortcut(key: .two, modifierFlags: [.command]))
-    KeyboardShortcutView()
-
-    KeyboardShortcutView(shortcut: KeyShortcut(key: .delete, modifierFlags: [.command, .option, .control, .shift]))
-    KeyboardShortcutView(shortcut: KeyShortcut(key: .c, modifierFlags: [.command, .option]))
-  }
-}

@@ -44,12 +44,3 @@ struct SearchFieldView: View {
     }
   }
 }
-
-#Preview {
-  return List {
-    SearchFieldView(placeholder: "search_placeholder", query: .constant(""))
-    SearchFieldView(placeholder: "search_placeholder", query: .constant("search"))
-  }
-  .frame(width: 300)
-  .environment(\.locale, .init(identifier: "en"))
-}

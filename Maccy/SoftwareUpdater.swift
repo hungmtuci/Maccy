@@ -1,3 +1,6 @@
+import Foundation
+import Observation
+#if canImport(Sparkle)
 import Sparkle
 
 @Observable
@@ -37,3 +40,11 @@ class SoftwareUpdater {
     updater.checkForUpdates()
   }
 }
+#else
+@Observable
+class SoftwareUpdater {
+  var automaticallyChecksForUpdates = false
+  init() {}
+  func checkForUpdates() {}
+}
+#endif

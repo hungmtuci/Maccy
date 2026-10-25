@@ -149,6 +149,12 @@ struct KeyHandlingView<Content: View>: View {
         case .pinOrUnpin:
           appState.togglePin()
           return .handled
+        case .syncOrUnsync:
+          appState.toggleSync()
+          return .handled
+        case .toggleSyncFilter:
+          appState.toggleSyncFilter()
+          return .handled
         case .selectCurrentItem:
           appState.select(flags: .currentModifierFlags)
           return .handled

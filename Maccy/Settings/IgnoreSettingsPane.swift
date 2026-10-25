@@ -20,8 +20,3 @@ struct IgnoreSettingsPane: View {
     .padding()
   }
 }
-
-#Preview {
-  IgnoreSettingsPane()
-    .environment(\.locale, .init(identifier: "en"))
-}

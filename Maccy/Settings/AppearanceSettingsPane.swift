@@ -245,8 +245,3 @@ struct AppearanceSettingsPane: View {
     }
   }
 }
-
-#Preview {
-  AppearanceSettingsPane()
-    .environment(\.locale, .init(identifier: "en"))
-}

@@ -64,12 +64,23 @@ struct PreviewItemView: View {
           }
           .frame(maxWidth: .infinity)
         }
+
+        if item.previewText.isTruncated {
+          HStack(spacing: 4) {
+            Image(systemName: "bolt.shield.fill")
+              .foregroundStyle(.orange)
+            Text("Nội dung lớn (\(item.formattedDataSize)) — Hiển thị 32 KB đầu để chống treo. Khi Paste vẫn giữ 100% dữ liệu gốc.")
+              .font(.system(size: 10))
+              .foregroundStyle(.secondary)
+          }
+          .padding(.vertical, 4)
+        }
       }
 
       Spacer(minLength: 0)
 
       Divider()
-        .padding(.bottom)
+        .padding(.bottom, 8)
 
       if let application = item.application {
         HStack(spacing: 3) {
@@ -89,11 +100,36 @@ struct PreviewItemView: View {
         }
       }
 
-      if item.hasImage, let size = item.imageSize {
-        HStack(spacing: 3) {
-          Text("Size", tableName: "PreviewItemView")
-          Text(size)
+      HStack(spacing: 3) {
+        Text("Size", tableName: "PreviewItemView")
+        Text(item.imageSize ?? item.formattedDataSize)
+      }
+
+      HStack(spacing: 5) {
+        Text("Google Drive:")
+        Button {
+          CloudSyncManager.shared.toggleSync(for: [item])
+        } label: {
+          HStack(spacing: 3) {
+            Image(systemName: item.isSynced ? "icloud.fill" : "icloud.and.arrow.up")
+            Text(item.isSynced ? "Đã đồng bộ (Bấm để huỷ)" : "Chưa đồng bộ (Bấm ⌥S để đồng bộ)")
+          }
+          .foregroundStyle(item.isSynced ? Color.accentColor : Color.secondary)
         }
+        .buttonStyle(.plain)
+      }
+
+      if item.isSynced, let device = item.syncSourceDevice {
+        HStack(spacing: 3) {
+          Text("Thiết bị đồng bộ:")
+          Image(systemName: "laptopcomputer")
+          Text(device)
+          if let syncDate = item.syncUpdatedAt {
+            Text("•")
+            Text(syncDate, style: .time)
+          }
+        }
+        .foregroundStyle(.secondary)
       }
 
       HStack(spacing: 3) {

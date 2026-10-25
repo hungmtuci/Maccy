@@ -55,8 +55,16 @@ class Search {
 
   private func fuzzySearch(string: String, within: [Searchable]) -> [SearchResult] {
     let pattern = fuse.createPattern(from: string)
+    let foldedQuery = string.foldingVietnameseDiacritics
+    let foldedPattern = foldedQuery != string ? fuse.createPattern(from: foldedQuery) : pattern
     let searchResults: [SearchResult] = within.compactMap { item in
-      fuzzySearch(for: pattern, in: item.title, of: item)
+      fuzzySearch(
+        for: pattern,
+        foldedPattern: foldedPattern,
+        in: item.title,
+        foldedSearchString: item.foldedTitle,
+        of: item
+      )
     }
     let sortedResults = searchResults.sorted(by: { ($0.score ?? 0) < ($1.score ?? 0) })
     return sortedResults
@@ -64,7 +72,9 @@ class Search {
 
   private func fuzzySearch(
     for pattern: Fuse.Pattern?,
+    foldedPattern: Fuse.Pattern?,
     in searchString: String,
+    foldedSearchString: String,
     of item: Searchable
   ) -> SearchResult? {
     var searchString = searchString
@@ -74,14 +84,27 @@ class Search {
       searchString = "\(searchString[...stopIndex])"
     }
 
-    if let fuzzyResult = fuse.search(pattern, in: searchString) {
+    var foldedTarget = foldedSearchString
+    if foldedTarget.count > fuzzySearchLimit {
+      let stopIndex = foldedTarget.index(foldedTarget.startIndex, offsetBy: fuzzySearchLimit)
+      foldedTarget = "\(foldedTarget[...stopIndex])"
+    }
+
+    let directMatch = fuse.search(pattern, in: searchString)
+    let foldedMatch = directMatch ?? fuse.search(foldedPattern ?? pattern, in: foldedTarget)
+
+    if let fuzzyResult = foldedMatch {
+      let maxChars = searchString.count
       return SearchResult(
         score: fuzzyResult.score,
         object: item,
-        ranges: fuzzyResult.ranges.map {
+        ranges: fuzzyResult.ranges.compactMap {
+          guard maxChars > 0 else { return nil }
+          let startOffset = Swift.max(0, Swift.min($0.lowerBound, maxChars))
+          let endOffset = Swift.max(startOffset, Swift.min($0.upperBound + 1, maxChars))
           let startIndex = searchString.startIndex
-          let lowerBound = searchString.index(startIndex, offsetBy: $0.lowerBound)
-          let upperBound = searchString.index(startIndex, offsetBy: $0.upperBound + 1)
+          let lowerBound = searchString.index(startIndex, offsetBy: startOffset)
+          let upperBound = searchString.index(startIndex, offsetBy: endOffset)
 
           return lowerBound..<upperBound
         }
@@ -105,11 +128,24 @@ class Search {
     of item: Searchable,
     options: NSString.CompareOptions
   ) -> SearchResult? {
-    if let range = searchString.range(of: string, options: options, range: nil, locale: nil) {
+    if let range = searchString.rangeByVietnameseSearch(
+      of: string,
+      options: options,
+      precomputedFoldedSelf: item.foldedTitle
+    ) {
       return SearchResult(object: item, ranges: [range])
-    } else {
-      return nil
     }
+
+    // Deep full-text search fallback for large items (> 1,000 chars) without blocking UI
+    if item.item.totalByteCount > searchString.utf8.count {
+      let foldedQuery = string.foldingVietnameseDiacritics
+      if !foldedQuery.isEmpty,
+         item.foldedSearchableBodyText.range(of: foldedQuery, options: options) != nil {
+        return SearchResult(object: item, ranges: [])
+      }
+    }
+
+    return nil
   }
 
   private func mixedSearch(string: String, within: [Searchable]) -> [SearchResult] {
