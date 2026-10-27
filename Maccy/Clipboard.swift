@@ -230,6 +230,14 @@ class Clipboard {
 
   private func extractPlainTextData(from item: HistoryItem?) -> Data? {
     if let item {
+      // 0. If item is a Microsoft Edge rich titled hyperlink (`org.microsoft.titled-hyperlink`), prefer clean URL
+      if item.contents.contains(where: { $0.type == NSPasteboard.PasteboardType.microsoftTitledHyperlink.rawValue }),
+         let cleanURL = Self.extractURL(from: item),
+         let urlData = cleanURL.absoluteString.data(using: .utf8),
+         !urlData.isEmpty {
+        return urlData
+      }
+
       // 1. Direct UTF-8 plain text (preserves 100% of even multi-MB text in O(1))
       if let stringContent = item.contents.first(where: { NSPasteboard.PasteboardType($0.type) == .string }),
          let data = stringContent.value,
@@ -352,6 +360,21 @@ class Clipboard {
       }
 
       if shouldIgnore(item) {
+        return
+      }
+
+      let rawItemTypes = Set(item.types)
+      if Defaults[.cleanRichURLsFromBrowsers],
+         !disabledTypes.contains(.string),
+         let cleanURL = Self.extractCleanURLFromTitledHyperlink(
+           rawTypes: rawItemTypes,
+           stringData: item.data(forType: .string),
+           urlData: item.data(forType: .URL),
+           htmlData: item.data(forType: .html),
+           titledHyperlinkData: item.data(forType: .microsoftTitledHyperlink)
+         ),
+         let cleanData = cleanURL.shortened(to: maxBytesLimit).data(using: .utf8) {
+        contents.append(HistoryItemContent(type: NSPasteboard.PasteboardType.string.rawValue, value: cleanData))
         return
       }
 
@@ -508,5 +531,180 @@ class Clipboard {
     }
 
     return newContents
+  }
+
+  /// Extracts a clean HTTP(S) URL when Microsoft Edge (`org.microsoft.titled-hyperlink`) or a browser
+  /// copies an address-bar Rich Link (`<a href="...">Page Title</a>`), leaving normal prose copies untouched.
+  nonisolated static func extractCleanURLFromTitledHyperlink(
+    rawTypes: Set<NSPasteboard.PasteboardType>,
+    stringData: Data?,
+    urlData: Data?,
+    htmlData: Data?,
+    titledHyperlinkData: Data?
+  ) -> String? {
+    let hasEdgeTitledHyperlink = rawTypes.contains(.microsoftTitledHyperlink)
+    let singleAnchorHref = htmlData.flatMap { extractSingleAnchorHref(from: $0) }
+    let isBrowserSingleAnchorURL = rawTypes.contains(.URL) && singleAnchorHref != nil
+
+    guard hasEdgeTitledHyperlink || isBrowserSingleAnchorURL else {
+      return nil
+    }
+
+    if let strData = stringData,
+       let plain = strData.utf8PrefixString(maxBytes: 8_192)?.trimmingCharacters(in: .whitespacesAndNewlines),
+       isValidStandaloneWebURL(plain) {
+      return plain
+    }
+
+    if let urlData,
+       let rawURL = extractWebURLString(fromURLData: urlData) {
+      return rawURL
+    }
+
+    if let edgeData = titledHyperlinkData,
+       let edgeHref = extractSingleAnchorHref(from: edgeData) ?? extractFirstHref(from: edgeData),
+       isValidStandaloneWebURL(edgeHref) {
+      return edgeHref
+    }
+
+    if let singleAnchorHref, isValidStandaloneWebURL(singleAnchorHref) {
+      return singleAnchorHref
+    }
+
+    if hasEdgeTitledHyperlink,
+       let htmlData,
+       let firstHref = extractFirstHref(from: htmlData),
+       isValidStandaloneWebURL(firstHref) {
+      return firstHref
+    }
+
+    return nil
+  }
+
+  nonisolated static func extractURL(from item: HistoryItem) -> URL? {
+    if let stringData = item.contents.first(where: { NSPasteboard.PasteboardType($0.type) == .string })?.value,
+       let plain = stringData.utf8PrefixString(maxBytes: 8_192)?.trimmingCharacters(in: .whitespacesAndNewlines),
+       isValidStandaloneWebURL(plain),
+       let url = URL(string: plain) {
+      return url
+    }
+
+    if let urlData = item.contents.first(where: { NSPasteboard.PasteboardType($0.type) == .URL })?.value,
+       let urlStr = extractWebURLString(fromURLData: urlData),
+       let url = URL(string: urlStr) {
+      return url
+    }
+
+    if let edgeData = item.contents.first(where: { $0.type == NSPasteboard.PasteboardType.microsoftTitledHyperlink.rawValue })?.value,
+       let href = extractFirstHref(from: edgeData),
+       isValidStandaloneWebURL(href),
+       let url = URL(string: href) {
+      return url
+    }
+
+    if let htmlData = item.htmlData,
+       let href = extractSingleAnchorHref(from: htmlData),
+       isValidStandaloneWebURL(href),
+       let url = URL(string: href) {
+      return url
+    }
+
+    return nil
+  }
+
+  /// Strips common marketing/tracking query parameters (`utm_*`, `fbclid`, `gclid`, `msclkid`, `igshid`, etc.).
+  nonisolated static func stripTrackingParameters(from url: URL) -> URL {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          let items = components.queryItems,
+          !items.isEmpty else {
+      return url
+    }
+
+    let exactTrackingKeys: Set<String> = [
+      "fbclid", "gclid", "dclid", "msclkid", "igshid", "mc_cid", "mc_eid", "yclid", "_hsenc", "_hsmi"
+    ]
+    let filtered = items.filter { item in
+      let key = item.name.lowercased()
+      if key.hasPrefix("utm_") { return false }
+      if exactTrackingKeys.contains(key) { return false }
+      return true
+    }
+
+    guard filtered.count != items.count else { return url }
+    components.queryItems = filtered.isEmpty ? nil : filtered
+    return components.url ?? url
+  }
+
+  private nonisolated static func isValidStandaloneWebURL(_ string: String) -> Bool {
+    guard !string.isEmpty,
+          string.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+          let url = URL(string: string),
+          let scheme = url.scheme?.lowercased(),
+          (scheme == "http" || scheme == "https"),
+          url.host != nil else {
+      return false
+    }
+    return true
+  }
+
+  private nonisolated static func extractWebURLString(fromURLData data: Data) -> String? {
+    if let str = data.utf8PrefixString(maxBytes: 8_192)?.trimmingCharacters(in: .whitespacesAndNewlines),
+       isValidStandaloneWebURL(str) {
+      return str
+    }
+    if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [Any],
+       let firstStr = plist.first as? String,
+       isValidStandaloneWebURL(firstStr) {
+      return firstStr
+    }
+    return nil
+  }
+
+  private nonisolated static func extractSingleAnchorHref(from data: Data) -> String? {
+    guard data.count <= 8_192,
+          let html = data.utf8PrefixString(maxBytes: 8_192)?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !html.isEmpty else {
+      return nil
+    }
+    // Strip optional <meta ...> or <!--StartFragment--> wrappers emitted by Chromium/Edge
+    let stripped = html
+      .replacingOccurrences(of: "(?is)<!--.*?-->", with: "", options: .regularExpression)
+      .replacingOccurrences(of: "(?is)<meta[^>]*>", with: "", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    let pattern = "^(?is)<a\\b[^>]*\\bhref\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>.*?</a>$"
+    guard let regex = try? NSRegularExpression(pattern: pattern),
+          let match = regex.firstMatch(in: stripped, range: NSRange(stripped.startIndex..., in: stripped)),
+          match.numberOfRanges > 1,
+          let hrefRange = Range(match.range(at: 1), in: stripped) else {
+      return nil
+    }
+    return unescapeHTMLAttribute(String(stripped[hrefRange]))
+  }
+
+  private nonisolated static func extractFirstHref(from data: Data) -> String? {
+    guard let text = data.utf8PrefixString(maxBytes: 16_384), !text.isEmpty else { return nil }
+    let pattern = "(?is)\\bhref\\s*=\\s*[\"'](https?://[^\"'\\s>]+)[\"']"
+    if let regex = try? NSRegularExpression(pattern: pattern),
+       let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+       match.numberOfRanges > 1,
+       let hrefRange = Range(match.range(at: 1), in: text) {
+      return unescapeHTMLAttribute(String(text[hrefRange]))
+    }
+    let urlPattern = "https?://[^\\s\"'<>\\0]+"
+    if let regex = try? NSRegularExpression(pattern: urlPattern),
+       let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+       let urlRange = Range(match.range(at: 0), in: text) {
+      return unescapeHTMLAttribute(String(text[urlRange]))
+    }
+    return nil
+  }
+
+  private nonisolated static func unescapeHTMLAttribute(_ value: String) -> String {
+    value
+      .replacingOccurrences(of: "&amp;", with: "&")
+      .replacingOccurrences(of: "&#38;", with: "&")
+      .replacingOccurrences(of: "&quot;", with: "\"")
+      .replacingOccurrences(of: "&#39;", with: "'")
   }
 }

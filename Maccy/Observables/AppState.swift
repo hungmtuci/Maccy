@@ -19,10 +19,25 @@ class AppState: Sendable {
   var cloudSync: CloudSyncManager { CloudSyncManager.shared }
 
   var isEditingItem: Bool = false
+  var editingItem: HistoryItemDecorator?
   var isShowingModalPanel: Bool = false
   var suppressPopupAutoClose: Bool {
     get { navigator.isDragAndDropInProgress || isEditingItem || isShowingModalPanel }
     set { isShowingModalPanel = newValue }
+  }
+
+  @MainActor
+  func beginEditing(_ item: HistoryItemDecorator? = nil) {
+    let target = item ?? (navigator.selection.count == 1 ? navigator.selection.first : nil)
+    guard let target, target.hasPlainText || target.hasRichText || target.hasImage else { return }
+    isEditingItem = true
+    editingItem = target
+  }
+
+  @MainActor
+  func finishEditing() {
+    editingItem = nil
+    isEditingItem = false
   }
 
   var searchVisible: Bool {

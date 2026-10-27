@@ -85,4 +85,7 @@ nonisolated extension Defaults.Keys {
   static let cloudSyncEncryptionEnabled = Key<Bool>("cloudSyncEncryptionEnabled", default: false, suite: preferencesSuite)
   static let cloudSyncPassphrase = Key<String>("cloudSyncPassphrase", default: "", suite: preferencesSuite)
   static let warnBeforeSyncingSecrets = Key<Bool>("warnBeforeSyncingSecrets", default: true, suite: preferencesSuite)
+  static let cleanRichURLsFromBrowsers = Key<Bool>("cleanRichURLsFromBrowsers", default: true, suite: preferencesSuite)
+  static let automaticallyChecksCustomUpdates = Key<Bool>("automaticallyChecksCustomUpdates", default: false, suite: preferencesSuite)
+  static let lastCustomUpdateCheckAt = Key<Date?>("lastCustomUpdateCheckAt", default: nil, suite: preferencesSuite)
 }

@@ -6,6 +6,7 @@ struct LargeTextView: NSViewRepresentable {
   @Environment(\.isEnabled) private var isEnabled
 
   private let previewText: String?
+  private let highlightQuery: String
   private let editorState: EditorState?
   private let isEditableOverwrite: Bool
   private var accessibilityLabel: String?
@@ -13,9 +14,10 @@ struct LargeTextView: NSViewRepresentable {
 
   private var isEditable: Bool { isEditableOverwrite && editorState != nil }
 
-  init(text: String, accessibilityLabel: String? = nil) {
+  init(text: String, highlightQuery: String = "", accessibilityLabel: String? = nil) {
     self.isEditableOverwrite = false
     self.previewText = text
+    self.highlightQuery = highlightQuery
     self.editorState = nil
     self.accessibilityLabel = accessibilityLabel
   }
@@ -28,6 +30,7 @@ struct LargeTextView: NSViewRepresentable {
   ) {
     self.isEditableOverwrite = isEditable
     self.previewText = nil
+    self.highlightQuery = ""
     self.editorState = editorState
     self.accessibilityLabel = accessibilityLabel
     self.onCancel = onCancel
@@ -38,15 +41,19 @@ struct LargeTextView: NSViewRepresentable {
   }
 
   func makeNSView(context: Context) -> NSScrollView {
+    let resolvedColor: NSColor = isEnabled ? .labelColor : .disabledControlTextColor
     let scrollView = Self.makeScrollView(
       text: editorState?.text ?? previewText ?? "",
       isEditable: isEditable,
       accessibilityLabel: accessibilityLabel,
-      textColor: isEnabled ? .labelColor : .disabledControlTextColor
+      textColor: resolvedColor
     )
     if let textView = scrollView.documentView as? NSTextView {
       textView.delegate = context.coordinator
       editorState?.textView = textView
+      if !isEditable, !highlightQuery.isEmpty {
+        Self.applySearchHighlight(query: highlightQuery, to: textView, baseTextColor: resolvedColor)
+      }
     }
     return scrollView
   }
@@ -56,10 +63,11 @@ struct LargeTextView: NSViewRepresentable {
     context.coordinator.parent = self
     guard let textView = scrollView.documentView as? NSTextView else { return }
 
+    let resolvedColor: NSColor = isEnabled ? .labelColor : .disabledControlTextColor
     textView.isEditable = isEditable
     textView.isSelectable = isEditable
     textView.allowsUndo = isEditable
-    textView.textColor = isEnabled ? .labelColor : .disabledControlTextColor
+    textView.textColor = resolvedColor
     textView.setAccessibilityLabel(accessibilityLabel)
 
     if previousEditorState !== editorState {
@@ -71,9 +79,63 @@ struct LargeTextView: NSViewRepresentable {
     // The native text view owns editable content until it is saved. SwiftUI
     // updates must not copy the text or replace its storage after each edit.
     guard !isEditable else { return }
-    guard context.coordinator.lastPreviewText != previewText else { return }
-    context.coordinator.lastPreviewText = previewText
-    textView.string = previewText ?? ""
+    let textChanged = context.coordinator.lastPreviewText != previewText
+    let queryChanged = context.coordinator.lastHighlightQuery != highlightQuery
+    guard textChanged || queryChanged else { return }
+
+    if textChanged {
+      context.coordinator.lastPreviewText = previewText
+      textView.string = previewText ?? ""
+    }
+    context.coordinator.lastHighlightQuery = highlightQuery
+    Self.applySearchHighlight(query: highlightQuery, to: textView, baseTextColor: resolvedColor)
+  }
+
+  private static func applySearchHighlight(
+    query: String,
+    to textView: NSTextView,
+    baseTextColor: NSColor
+  ) {
+    guard let storage = textView.textStorage else { return }
+    let text = textView.string
+    let fullLength = (text as NSString).length
+    guard fullLength > 0 else { return }
+
+    let fullRange = NSRange(location: 0, length: fullLength)
+    let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    storage.beginEditing()
+    storage.setAttributes(
+      [.font: font, .foregroundColor: baseTextColor],
+      range: fullRange
+    )
+
+    var firstMatchNSRange: NSRange?
+    if !trimmedQuery.isEmpty {
+      let matches = text.allRangesByVietnameseSearch(of: trimmedQuery, maxMatches: 60)
+      for matchRange in matches {
+        let nsRange = NSRange(matchRange, in: text)
+        guard nsRange.length > 0, NSMaxRange(nsRange) <= fullLength else { continue }
+        if firstMatchNSRange == nil {
+          firstMatchNSRange = nsRange
+        }
+        storage.addAttributes(
+          [
+            .backgroundColor: NSColor.findHighlightColor,
+            .foregroundColor: NSColor.black
+          ],
+          range: nsRange
+        )
+      }
+    }
+    storage.endEditing()
+
+    if let firstMatchNSRange {
+      DispatchQueue.main.async {
+        textView.scrollRangeToVisible(firstMatchNSRange)
+      }
+    }
   }
 
   static func dismantleNSView(
@@ -171,10 +233,12 @@ struct LargeTextView: NSViewRepresentable {
   final class Coordinator: NSObject, NSTextViewDelegate {
     var parent: LargeTextView
     var lastPreviewText: String?
+    var lastHighlightQuery: String
 
     init(_ parent: LargeTextView) {
       self.parent = parent
       self.lastPreviewText = parent.previewText
+      self.lastHighlightQuery = parent.highlightQuery
     }
 
     func textDidChange(_ notification: Notification) {

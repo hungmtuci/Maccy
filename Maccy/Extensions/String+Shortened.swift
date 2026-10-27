@@ -62,6 +62,15 @@ extension String {
       .replacingOccurrences(of: "Đ", with: "d")
   }
 
+  /// Strips Vietnamese diacritics while preserving uppercase/lowercase letters (e.g. "Nguyễn Văn Đạt" -> "Nguyen Van Dat").
+  nonisolated var removingVietnameseDiacriticsPreservingCase: String {
+    guard !isEmpty else { return "" }
+    return self
+      .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "vi_VN"))
+      .replacingOccurrences(of: "đ", with: "d")
+      .replacingOccurrences(of: "Đ", with: "D")
+  }
+
   /// Finds `query` in `self`, supporting both exact match and Vietnamese unaccented (tiếng Việt không dấu) match,
   /// returning a valid `Range<String.Index>` on `self` for UI highlighting.
   nonisolated func rangeByVietnameseSearch(
@@ -86,14 +95,95 @@ extension String {
 
     // 3. Full Vietnamese folding match (handles đ/Đ <-> d and regex on unaccented text)
     let foldedSelf = precomputedFoldedSelf ?? self.foldingVietnameseDiacritics
-    let foldedQuery = options.contains(.regularExpression)
-      ? query.foldingVietnameseDiacritics
-      : query.foldingVietnameseDiacritics
+    let foldedQuery = query.foldingVietnameseDiacritics
 
     guard let foldedRange = foldedSelf.range(of: foldedQuery, options: options) else {
       return nil
     }
 
+    return mapFoldedRangeToOriginal(foldedRange, in: foldedSelf)
+  }
+
+  /// Matches multi-word queries where words are separated by spaces (e.g. "implant khoa 41" matching
+  /// "Cấy ghép Implant nha khoa cơ bản - Khóa 41"), returning merged highlight ranges when ALL tokens match.
+  nonisolated func multiWordRangesByVietnameseSearch(
+    of query: String,
+    precomputedFoldedSelf: String? = nil
+  ) -> [Range<String.Index>]? {
+    let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
+    guard tokens.count >= 2, !isEmpty else { return nil }
+
+    let foldedSelf = precomputedFoldedSelf ?? self.foldingVietnameseDiacritics
+    var collected: [Range<String.Index>] = []
+    collected.reserveCapacity(tokens.count)
+
+    for token in tokens {
+      guard let range = self.rangeByVietnameseSearch(
+        of: token,
+        options: .caseInsensitive,
+        precomputedFoldedSelf: foldedSelf
+      ) else {
+        return nil
+      }
+      collected.append(range)
+    }
+
+    return Self.mergeOverlappingRanges(collected)
+  }
+
+  /// Finds up to `maxMatches` occurrences of `query` (or its whitespace-separated tokens) in `self`
+  /// using Vietnamese unaccented matching, suitable for highlighting matches in snippets and preview panes.
+  nonisolated func allRangesByVietnameseSearch(
+    of query: String,
+    precomputedFoldedSelf: String? = nil,
+    maxMatches: Int = 60
+  ) -> [Range<String.Index>] {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !isEmpty, maxMatches > 0 else { return [] }
+
+    let foldedSelf = precomputedFoldedSelf ?? self.foldingVietnameseDiacritics
+    guard !foldedSelf.isEmpty else { return [] }
+
+    let fullFolded = trimmed.foldingVietnameseDiacritics
+    var searchTerms: [String] = []
+    if !fullFolded.isEmpty, foldedSelf.contains(fullFolded) {
+      searchTerms = [fullFolded]
+    } else {
+      let tokens = trimmed
+        .split(whereSeparator: \.isWhitespace)
+        .map { String($0).foldingVietnameseDiacritics }
+        .filter { !$0.isEmpty }
+      searchTerms = Array(Set(tokens))
+    }
+
+    guard !searchTerms.isEmpty else { return [] }
+
+    var found: [Range<String.Index>] = []
+    for term in searchTerms {
+      var searchStart = foldedSelf.startIndex
+      while searchStart < foldedSelf.endIndex, found.count < maxMatches {
+        guard let foldedRange = foldedSelf.range(
+          of: term,
+          options: .caseInsensitive,
+          range: searchStart..<foldedSelf.endIndex
+        ) else {
+          break
+        }
+        if foldedRange.isEmpty { break }
+        if let mapped = mapFoldedRangeToOriginal(foldedRange, in: foldedSelf), !mapped.isEmpty {
+          found.append(mapped)
+        }
+        searchStart = foldedRange.upperBound
+      }
+    }
+
+    return Self.mergeOverlappingRanges(found)
+  }
+
+  private nonisolated func mapFoldedRangeToOriginal(
+    _ foldedRange: Range<String.Index>,
+    in foldedSelf: String
+  ) -> Range<String.Index>? {
     let startOffset = foldedSelf.distance(from: foldedSelf.startIndex, to: foldedRange.lowerBound)
     let matchLength = foldedSelf.distance(from: foldedRange.lowerBound, to: foldedRange.upperBound)
     let selfCount = self.count
@@ -104,6 +194,24 @@ extension String {
     let lower = self.index(self.startIndex, offsetBy: clampedStart)
     let upper = self.index(lower, offsetBy: clampedLength)
     return lower..<upper
+  }
+
+  nonisolated static func mergeOverlappingRanges(_ ranges: [Range<String.Index>]) -> [Range<String.Index>] {
+    guard ranges.count > 1 else { return ranges }
+    let sorted = ranges.sorted {
+      $0.lowerBound == $1.lowerBound ? $0.upperBound < $1.upperBound : $0.lowerBound < $1.lowerBound
+    }
+    var merged: [Range<String.Index>] = []
+    merged.reserveCapacity(sorted.count)
+    for range in sorted {
+      if let last = merged.last, range.lowerBound <= last.upperBound {
+        let newUpper = Swift.max(last.upperBound, range.upperBound)
+        merged[merged.count - 1] = last.lowerBound..<newUpper
+      } else {
+        merged.append(range)
+      }
+    }
+    return merged
   }
 }
 

@@ -29,6 +29,7 @@ class Search {
     var score: Double?
     var object: Searchable
     var ranges: [Range<String.Index>] = []
+    var matchedInBody: Bool = false
   }
 
   typealias Searchable = HistoryItemDecorator
@@ -61,6 +62,7 @@ class Search {
       fuzzySearch(
         for: pattern,
         foldedPattern: foldedPattern,
+        rawQuery: string,
         in: item.title,
         foldedSearchString: item.foldedTitle,
         of: item
@@ -73,6 +75,7 @@ class Search {
   private func fuzzySearch(
     for pattern: Fuse.Pattern?,
     foldedPattern: Fuse.Pattern?,
+    rawQuery: String,
     in searchString: String,
     foldedSearchString: String,
     of item: Searchable
@@ -109,9 +112,15 @@ class Search {
           return lowerBound..<upperBound
         }
       )
-    } else {
-      return nil
     }
+
+    // Deep 64 KB body fallback for long items in Fuzzy mode (ranked below title matches)
+    if item.item.totalByteCount > searchString.utf8.count,
+       bodyMatches(query: rawQuery, in: item, options: .caseInsensitive) {
+      return SearchResult(score: 0.68, object: item, ranges: [], matchedInBody: true)
+    }
+
+    return nil
   }
 
   private func simpleSearch(
@@ -136,16 +145,49 @@ class Search {
       return SearchResult(object: item, ranges: [range])
     }
 
-    // Deep full-text search fallback for large items (> 1,000 chars) without blocking UI
-    if item.item.totalByteCount > searchString.utf8.count {
-      let foldedQuery = string.foldingVietnameseDiacritics
-      if !foldedQuery.isEmpty,
-         item.foldedSearchableBodyText.range(of: foldedQuery, options: options) != nil {
-        return SearchResult(object: item, ranges: [])
-      }
+    // Multi-word non-contiguous token search in title (e.g. "implant khoa 41" -> "Cấy ghép Implant ... Khóa 41")
+    if !options.contains(.regularExpression),
+       let tokenRanges = searchString.multiWordRangesByVietnameseSearch(
+         of: string,
+         precomputedFoldedSelf: item.foldedTitle
+       ) {
+      return SearchResult(object: item, ranges: tokenRanges)
+    }
+
+    // Deep full-text search fallback for large items (> title length, up to 64 KB) without blocking UI
+    if item.item.totalByteCount > searchString.utf8.count,
+       bodyMatches(query: string, in: item, options: options) {
+      return SearchResult(object: item, ranges: [], matchedInBody: true)
     }
 
     return nil
+  }
+
+  private func bodyMatches(
+    query: String,
+    in item: Searchable,
+    options: NSString.CompareOptions
+  ) -> Bool {
+    let foldedQuery = query.foldingVietnameseDiacritics
+    guard !foldedQuery.isEmpty else { return false }
+
+    let body = item.foldedSearchableBodyText
+    guard !body.isEmpty else { return false }
+
+    if body.range(of: foldedQuery, options: options) != nil {
+      return true
+    }
+
+    if !options.contains(.regularExpression) {
+      let tokens = foldedQuery.split(whereSeparator: \.isWhitespace)
+      if tokens.count >= 2 {
+        return tokens.allSatisfy { token in
+          body.range(of: String(token), options: .caseInsensitive) != nil
+        }
+      }
+    }
+
+    return false
   }
 
   private func mixedSearch(string: String, within: [Searchable]) -> [SearchResult] {

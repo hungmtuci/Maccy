@@ -26,10 +26,17 @@ struct GeneralSettingsPane: View {
         Toggle(isOn: $updater.automaticallyChecksForUpdates) {
           Text("CheckForUpdates", tableName: "GeneralSettings")
         }
-        Button(
-          action: { updater.checkForUpdates() },
-          label: { Text("CheckNow", tableName: "GeneralSettings") }
-        )
+        HStack(spacing: 8) {
+          Button(
+            action: { updater.checkForUpdates() },
+            label: { Text("CheckNow", tableName: "GeneralSettings") }
+          )
+          .disabled(updater.isChecking)
+
+          Link("GitHub (hungmtuci/Maccy) ↗", destination: SoftwareUpdater.releasesPageURL)
+            .controlSize(.small)
+            .foregroundStyle(.secondary)
+        }
       }
 
       Settings.Section(label: { Text("Open", tableName: "GeneralSettings") }) {
@@ -100,6 +107,12 @@ struct GeneralSettingsPane: View {
           Text("PasteWithoutFormatting", tableName: "GeneralSettings")
         }
         .onChange(refreshModifiers)
+        .fixedSize()
+
+        Defaults.Toggle(key: .cleanRichURLsFromBrowsers) {
+          Text("Tự làm sạch Rich Link khi copy URL (Microsoft Edge / Trình duyệt)")
+        }
+        .help("Khi sao chép thanh địa chỉ từ Microsoft Edge (org.microsoft.titled-hyperlink), tự động lưu đường dẫn URL thuần thay vì tiêu đề liên kết HTML.")
         .fixedSize()
 
         Text(String(

@@ -35,6 +35,7 @@ struct ListItemView<Title: View, ID: Hashable>: View {
   var image: NSImage?
   var accessoryImage: NSImage?
   var attributedTitle: AttributedString?
+  var matchedSnippet: AttributedString? = nil
   var shortcuts: [KeyShortcut]
   var isSelected: Bool
   var isSynced: Bool = false
@@ -83,7 +84,12 @@ struct ListItemView<Title: View, ID: Hashable>: View {
           .padding(.trailing, 5)
           .padding(.vertical, 5)
       } else {
-        ListItemTitleView(attributedTitle: attributedTitle, title: title)
+        ListItemTitleView(
+          attributedTitle: attributedTitle,
+          matchedSnippet: matchedSnippet,
+          isSelected: isSelected,
+          title: title
+        )
           .accessibilityHidden(true)
           .padding(.trailing, 5)
       }

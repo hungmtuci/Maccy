@@ -146,6 +146,9 @@ struct KeyHandlingView<Content: View>: View {
         case .openPreferences:
           appState.openPreferences()
           return .handled
+        case .editCurrentItem:
+          appState.beginEditing()
+          return .handled
         case .pinOrUnpin:
           appState.togglePin()
           return .handled

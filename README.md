@@ -61,19 +61,26 @@ Phiên bản này giữ nguyên triết lý gọn nhẹ của Maccy gốc, đồ
 - Nhấn **`⌥⌘S`** (hoặc bấm biểu tượng đám mây trên thanh tìm kiếm) để lọc chỉ xem các mục đã đồng bộ.
 - **Bảo mật & Hiệu năng đám mây**:
   - Tùy chọn **Mã hóa đầu-cuối AES-256-GCM** bằng mật khẩu riêng trong `Preferences -> Google Drive`.
-  - Tự động **nén LZFSE** (giảm 70–85% dung lượng văn bản) và tách các dữ liệu lớn ($> 64\text{ KB}$) ra thư mục `blobs/` giúp tránh xung đột file khi nhiều máy Mac cùng đồng bộ.
+  - Tự động **nén LZFSE** (giảm 70–85% dung lượng văn bản), xử lý nén/mã hóa/đọc-ghi hoàn toàn trên **luồng nền (Background Thread)** giúp giao diện mượt 100%, và tách dữ liệu lớn ($> 64\text{ KB}$) ra thư mục `blobs/`.
+  - **Tự động gộp file xung đột Google Drive** (`maccy-synced-items (1).json`) theo dấu thời gian `updatedAt` mới nhất, đồng bộ hai chiều cả **Tên gợi nhớ (Alias)** lẫn **Phím ghim (Pin)**, và **tự dọn rác file `.blob` cũ** khi bỏ đồng bộ.
   - Cảnh báo thông minh khi bấm đồng bộ nhầm nội dung chứa **Private Key / API Token** (`sk-...`, `ghp_...`, `AKIA...`, `AIza...`) mà chưa bật mã hóa.
   - Hiển thị tên máy Mac nguồn và thời gian đồng bộ ngay trong khung xem trước (`Preview`).
 
-### 3. 🇻🇳 Tra cứu Tiếng Việt không dấu & Tìm kiếm sâu (Full-Text Search)
-- Hỗ trợ tìm kiếm **tiếng Việt không dấu** (bao gồm `đ/Đ` $\leftrightarrow$ `d` và bỏ dấu thanh/mũ) trên mọi chế độ (`Exact`, `Fuzzy`, `Regex`, `Mixed`) và tô sáng chính xác cụm từ có dấu trên giao diện.
-- Tự động mở rộng phạm vi tìm kiếm vào tới **64 KB nội dung bên trong** đối với các đoạn văn bản dài hơn tiêu đề hiển thị.
+### 3. 🇻🇳 Tra cứu Tiếng Việt không dấu, Đa từ khóa & Nhận diện chữ OCR
+- Hỗ trợ tìm kiếm **tiếng Việt không dấu** (bao gồm `đ/Đ` $\leftrightarrow$ `d`, bỏ dấu thanh/mũ) và **tìm gõ rời nhiều từ khóa** (ví dụ gõ `implant khoa 41` khớp ngay *"Cấy ghép Implant nha khoa cơ bản - Khóa 41"*) trên cả tiêu đề lẫn **64 KB nội dung sâu** ở mọi chế độ (`Exact`, `Fuzzy`, `Regex`, `Mixed`).
+- **Trích đoạn thông minh (Matched Snippet) & Tô sáng trong Preview**: Tự động hiển thị dòng trích đoạn chứa từ khóa khi khớp sâu trong văn bản dài, đồng thời tô sáng từ khóa và tự cuộn tới vị trí khớp trong khung `Preview`.
+- **OCR Tiếng Việt trên hình ảnh**: Ưu tiên nhận diện ngôn ngữ `vi-VN` + `en-US` bằng Apple Vision giúp chụp ảnh màn hình có chữ tiếng Việt xong có thể gõ không dấu để tìm ra ảnh hoặc trích xuất chữ chuẩn dấu.
 
-### 4. ⌨️ Phím tắt mặc định tối ưu
-- **`Command + Shift + V` (`⌘⇧V`)**: Mở nhanh danh sách lịch sử Clipboard.
-- **`Command + Shift + C` (`⌘⇧C`)**: **Dán ngay Plain Text** (văn bản thuần không định dạng) của nội dung copy gần nhất vào ứng dụng đang làm việc (vẫn giữ nguyên bản có định dạng trong lịch sử Maccy).
-- **`Option + S` (`⌥S`)**: Đồng bộ / Hủy đồng bộ mục đang chọn lên Google Drive.
-- **`Option + Command + S` (`⌥⌘S`)**: Bật/tắt bộ lọc chỉ hiện mục đã đồng bộ.
+### 4. ⚡ Thao tác nhanh, Làm sạch Rich Link (Microsoft Edge) & Phím tắt tối ưu
+- **Tự làm sạch Rich Link từ Microsoft Edge (`org.microsoft.titled-hyperlink`)**: Khi copy URL từ thanh địa chỉ trình duyệt, tự giữ lại đường dẫn URL thuần thay vì tiêu đề liên kết HTML (kèm menu chuột phải xóa nhanh mã theo dõi `utm_*` / `fbclid` / `gclid`).
+- **Menu chuột phải & Biến đổi nhanh**: Dán nhanh Plain Text, Đặt tên gợi nhớ / Chỉnh sửa (**`⌘E`**), Format/Minify JSON, xóa khoảng trắng thừa, gộp 1 dòng, đổi chữ HOA/thường, và bỏ dấu tiếng Việt (giữ nguyên HOA/thường).
+- **Bảo vệ bản Custom khi kiểm tra cập nhật**: Trỏ kiểm tra phiên bản trực tiếp về GitHub Releases [`hungmtuci/Maccy`](https://github.com/hungmtuci/Maccy/releases) để không bao giờ bị ghi đè mất các tính năng tùy chỉnh.
+- **Phím tắt mặc định**:
+  - **`Command + Shift + V` (`⌘⇧V`)**: Mở nhanh danh sách lịch sử Clipboard.
+  - **`Command + Shift + C` (`⌘⇧C`)**: **Dán ngay Plain Text** (văn bản thuần không định dạng) của nội dung copy gần nhất vào ứng dụng đang làm việc (tương thích chống nhân đôi khi dùng chung với Alfred).
+  - **`Command + E` (`⌘E`)**: Đặt tên gợi nhớ (Alias) / Đổi phím ghim / Sửa nội dung mục đang chọn.
+  - **`Option + S` (`⌥S`)**: Đồng bộ / Hủy đồng bộ mục đang chọn lên Google Drive.
+  - **`Option + Command + S` (`⌥⌘S`)**: Bật/tắt bộ lọc chỉ hiện mục đã đồng bộ.
 
 ### 5. 🛠️ Hướng dẫn tự biên dịch nhanh (`build_maccy.sh`)
 Hỗ trợ biên dịch trực tiếp bằng Swift Package Manager / CommandLineTools mà không bắt buộc cài đặt toàn bộ Xcode:

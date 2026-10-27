@@ -602,8 +602,14 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   private func updateSearchResults() {
     if searchQuery.isEmpty {
-      for item in allPinnedItems { item.attributedTitle = nil }
-      for item in allUnpinnedItems { item.attributedTitle = nil }
+      for item in allPinnedItems {
+        item.attributedTitle = nil
+        item.matchedSnippet = nil
+      }
+      for item in allUnpinnedItems {
+        item.attributedTitle = nil
+        item.matchedSnippet = nil
+      }
       filteredPinnedItems = allPinnedItems
       filteredUnpinnedItems = allUnpinnedItems
     } else {
@@ -621,7 +627,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   private func filteredItems(from results: [Search.SearchResult]) -> [HistoryItemDecorator] {
     results.map { result in
       let item = result.object
-      item.highlight(searchQuery, result.ranges)
+      item.highlight(searchQuery, result.ranges, matchedInBody: result.matchedInBody)
 
       return item
     }

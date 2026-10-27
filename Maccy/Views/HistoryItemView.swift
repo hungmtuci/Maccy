@@ -41,6 +41,44 @@ struct HistoryItemView: View {
     }
   }
 
+  private var detectedURL: URL? {
+    guard !item.hasImage, !item.hasFileURLs else { return nil }
+    return Clipboard.extractURL(from: item.item)
+  }
+
+  private var editableSourceText: String? {
+    guard !item.hasImage, !item.hasFileURLs else { return nil }
+    if let fullText = item.item.text, !fullText.isEmpty {
+      return fullText
+    }
+    let preview = item.previewText.string
+    return preview.isEmpty ? nil : preview
+  }
+
+  private var formattedJSONCandidate: (pretty: String, minified: String)? {
+    guard let raw = editableSourceText?.trimmingCharacters(in: .whitespacesAndNewlines),
+          raw.count <= 2_097_152,
+          (raw.hasPrefix("{") || raw.hasPrefix("[")),
+          let data = raw.data(using: .utf8),
+          let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+          let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys]),
+          let minifiedData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.sortedKeys]),
+          let pretty = String(data: prettyData, encoding: .utf8),
+          let minified = String(data: minifiedData, encoding: .utf8) else {
+      return nil
+    }
+    return (pretty, minified)
+  }
+
+  private func copyTransformedText(_ transformed: String, pasteImmediately: Bool = false) {
+    guard !transformed.isEmpty else { return }
+    appState.popup.close()
+    Clipboard.shared.copyInMaccy(transformed)
+    if pasteImmediately {
+      Clipboard.shared.paste()
+    }
+  }
+
   var body: some View {
     ListItemView(
       id: item.id,
@@ -49,6 +87,7 @@ struct HistoryItemView: View {
       image: item.thumbnailImage,
       accessoryImage: item.thumbnailImage != nil ? nil : colorSwatchImage,
       attributedTitle: item.attributedTitle,
+      matchedSnippet: item.matchedSnippet,
       shortcuts: item.shortcuts,
       isSelected: item.isSelected,
       isSynced: item.isSynced,
@@ -64,6 +103,109 @@ struct HistoryItemView: View {
     .accessibilityIdentifier("copy-history-item")
     .buttonAction(performSelect)
     .contextMenu {
+      Button {
+        appState.history.select(item, flags: [])
+      } label: {
+        Label("Sao chép / Dán", systemImage: "doc.on.doc")
+      }
+
+      if !item.hasImage {
+        Button {
+          appState.popup.close()
+          Clipboard.shared.copy(item.item, removeFormatting: true)
+          Clipboard.shared.paste()
+        } label: {
+          Label("Dán Plain Text (Không định dạng)", systemImage: "doc.plaintext")
+        }
+      } else if !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        Button {
+          copyTransformedText(item.title, pasteImmediately: false)
+        } label: {
+          Label("Sao chép chữ trích xuất (OCR)", systemImage: "text.viewfinder")
+        }
+      }
+
+      if let url = detectedURL {
+        Button {
+          copyTransformedText(url.absoluteString)
+        } label: {
+          Label("Sao chép URL thuần", systemImage: "link")
+        }
+
+        let stripped = Clipboard.stripTrackingParameters(from: url)
+        if stripped.absoluteString != url.absoluteString {
+          Button {
+            copyTransformedText(stripped.absoluteString)
+          } label: {
+            Label("Sao chép URL sạch (xoá UTM / fbclid)", systemImage: "sparkles")
+          }
+        }
+      }
+
+      Divider()
+
+      if item.hasPlainText || item.hasRichText || item.hasImage {
+        Button {
+          appState.navigator.select(item: item)
+          appState.beginEditing(item)
+        } label: {
+          Label("Đặt tên gợi nhớ / Chỉnh sửa… (⌘E)", systemImage: "pencil.and.list.clipboard")
+        }
+      }
+
+      if let sourceText = editableSourceText {
+        Menu {
+          Button("Xóa khoảng trắng & dòng trống thừa") {
+            let cleaned = sourceText
+              .components(separatedBy: .newlines)
+              .map { $0.trimmingCharacters(in: .whitespaces) }
+              .joined(separator: "\n")
+              .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+              .trimmingCharacters(in: .whitespacesAndNewlines)
+            copyTransformedText(cleaned)
+          }
+
+          Button("Gộp thành 1 dòng duy nhất") {
+            let singleLine = sourceText
+              .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+              .trimmingCharacters(in: .whitespacesAndNewlines)
+            copyTransformedText(singleLine)
+          }
+
+          if let json = formattedJSONCandidate {
+            Divider()
+            Button("Format JSON đẹp (Pretty Print)") {
+              copyTransformedText(json.pretty)
+            }
+            Button("Nén gọn JSON (Minify)") {
+              copyTransformedText(json.minified)
+            }
+          }
+
+          Divider()
+
+          Button("IN HOA TOÀN BỘ") {
+            copyTransformedText(sourceText.uppercased(with: Locale(identifier: "vi_VN")))
+          }
+
+          Button("chữ thường toàn bộ") {
+            copyTransformedText(sourceText.lowercased(with: Locale(identifier: "vi_VN")))
+          }
+
+          Button("Viết Hoa Đầu Từ") {
+            copyTransformedText(sourceText.capitalized(with: Locale(identifier: "vi_VN")))
+          }
+
+          Button("Bỏ dấu Tiếng Việt (giữ HOA/thường)") {
+            copyTransformedText(sourceText.removingVietnameseDiacriticsPreservingCase)
+          }
+        } label: {
+          Label("Biến đổi nhanh & Sao chép", systemImage: "wand.and.stars")
+        }
+      }
+
+      Divider()
+
       Button {
         if item.isSelected && appState.navigator.selection.count > 1 {
           appState.toggleSync()
@@ -87,12 +229,6 @@ struct HistoryItemView: View {
       }
 
       Divider()
-
-      Button {
-        appState.history.select(item, flags: [])
-      } label: {
-        Label("Sao chép / Dán", systemImage: "doc.on.doc")
-      }
 
       Button(role: .destructive) {
         appState.history.delete(item)

@@ -60,6 +60,11 @@ struct ContentView: View {
     .environment(appState)
     .environment(modifierFlags)
     .environment(\.scenePhase, scenePhase)
+    .sheet(item: $appState.editingItem, onDismiss: {
+      appState.finishEditing()
+    }) { item in
+      ItemEditorView(for: item)
+    }
     .onChange(of: appState.isEditingItem) { _, isEditingItem in
       // A sheet's text controls otherwise remain the logical focus target after
       // dismissal, preventing the popup's key handler from receiving shortcuts.

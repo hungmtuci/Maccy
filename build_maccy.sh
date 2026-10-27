@@ -11,7 +11,7 @@ export PATH="$HOME/.local/bin:$PROJECT_DIR:$PATH"
 
 APP_NAME="Maccy"
 BUNDLE_ID="org.p0deje.Maccy"
-VERSION="2.6.0-custom"
+VERSION="2.7.0-custom"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 WORKSPACE_APP_BUNDLE="$(dirname "$PROJECT_DIR")/$APP_NAME.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
@@ -19,6 +19,7 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
 echo "==> [1/5] Đang biên dịch $APP_NAME (Release)..."
+find "$PROJECT_DIR" -not -path '*/.git/*' -not -path '*/.build/*' -name '* 2*' -delete 2>/dev/null || true
 swift build --build-system native -c release --product "$APP_NAME"
 BIN_PATH="$(swift build --build-system native -c release --product "$APP_NAME" --show-bin-path)/$APP_NAME"
 
@@ -107,7 +108,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 	<key>CFBundleShortVersionString</key>
 	<string>${VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>260</string>
+	<string>270</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © Alexey Rodionov • Custom Edition by Hung Le Xuan</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
@@ -142,6 +145,7 @@ TMP_SIGN_DIR="/tmp/maccy_sign_$$"
 rm -rf "$TMP_SIGN_DIR"
 mkdir -p "$TMP_SIGN_DIR"
 cp -R "$APP_BUNDLE" "$TMP_SIGN_DIR/$APP_NAME.app"
+chmod -R u+w "$TMP_SIGN_DIR/$APP_NAME.app" 2>/dev/null || true
 xattr -cr "$TMP_SIGN_DIR/$APP_NAME.app" 2>/dev/null || true
 codesign --force --deep --sign - "$TMP_SIGN_DIR/$APP_NAME.app"
 rm -rf "$APP_BUNDLE"

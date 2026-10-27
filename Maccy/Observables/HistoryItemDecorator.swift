@@ -3,6 +3,7 @@ import Defaults
 import Foundation
 import Observation
 import Sauce
+import SwiftUI
 
 @Observable
 class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
@@ -20,6 +21,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
 
   var title: String = ""
   var attributedTitle: AttributedString?
+  var matchedSnippet: AttributedString?
 
   var isVisible: Bool = true
   var selectionIndex: Int = -1
@@ -57,6 +59,8 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   @ObservationIgnored
   private var _cachedFoldedTitle: String?
   @ObservationIgnored
+  private var _cachedSearchableBodyText: String?
+  @ObservationIgnored
   private var _cachedFoldedBodyText: String?
 
   var foldedTitle: String {
@@ -68,13 +72,22 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return folded
   }
 
+  /// Lazily extracted plain body text (up to 64 KB) for deep search & snippet generation.
+  var searchableBodyText: String {
+    if let cached = _cachedSearchableBodyText {
+      return cached
+    }
+    let extracted = item.previewableTextPrefix(maxBytes: 65_536).text
+    _cachedSearchableBodyText = extracted
+    return extracted
+  }
+
   /// Lazily computed folded body text (up to 64 KB) for deep full-text search in long items.
   var foldedSearchableBodyText: String {
     if let cached = _cachedFoldedBodyText {
       return cached
     }
-    let extracted = item.previewableTextPrefix(maxBytes: 65_536).text
-    let folded = extracted.foldingVietnameseDiacritics
+    let folded = searchableBodyText.foldingVietnameseDiacritics
     _cachedFoldedBodyText = folded
     return folded
   }
@@ -106,6 +119,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   func invalidatePreviewText() {
     _cachedPreviewText = nil
     _cachedFoldedTitle = nil
+    _cachedSearchableBodyText = nil
     _cachedFoldedBodyText = nil
   }
 
@@ -136,6 +150,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     hasher.combine(id)
     hasher.combine(title)
     hasher.combine(attributedTitle)
+    hasher.combine(matchedSnippet)
     hasher.combine(isSynced)
   }
 
@@ -272,31 +287,88 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     generateThumbnailImage()
   }
 
-  func highlight(_ query: String, _ ranges: [Range<String.Index>]) {
+  func highlight(_ query: String, _ ranges: [Range<String.Index>], matchedInBody: Bool = false) {
     guard !query.isEmpty, !title.isEmpty else {
       attributedTitle = nil
+      matchedSnippet = nil
       return
     }
 
+    if ranges.isEmpty && matchedInBody {
+      attributedTitle = nil
+      matchedSnippet = buildMatchedBodySnippet(for: query)
+      return
+    }
+
+    matchedSnippet = nil
     var attributedString = AttributedString(title.shortened(to: 500))
     for range in ranges {
       if let lowerBound = AttributedString.Index(range.lowerBound, within: attributedString),
          let upperBound = AttributedString.Index(range.upperBound, within: attributedString) {
-        switch Defaults[.highlightMatch] {
-        case .bold:
-          attributedString[lowerBound..<upperBound].font = .bold(.body)()
-        case .italic:
-          attributedString[lowerBound..<upperBound].font = .italic(.body)()
-        case .underline:
-          attributedString[lowerBound..<upperBound].underlineStyle = .single
-        default:
-          attributedString[lowerBound..<upperBound].backgroundColor = .findHighlightColor
-          attributedString[lowerBound..<upperBound].foregroundColor = .black
-        }
+        applyHighlightStyle(to: &attributedString, range: lowerBound..<upperBound, baseFont: .body)
       }
     }
 
     attributedTitle = attributedString
+  }
+
+  private func applyHighlightStyle(
+    to attributedString: inout AttributedString,
+    range: Range<AttributedString.Index>,
+    baseFont: Font
+  ) {
+    switch Defaults[.highlightMatch] {
+    case .bold:
+      attributedString[range].font = baseFont.bold()
+    case .italic:
+      attributedString[range].font = baseFont.italic()
+    case .underline:
+      attributedString[range].underlineStyle = .single
+    default:
+      attributedString[range].backgroundColor = .findHighlightColor
+      attributedString[range].foregroundColor = .black
+    }
+  }
+
+  private func buildMatchedBodySnippet(for query: String) -> AttributedString? {
+    let body = searchableBodyText
+    guard !body.isEmpty else { return nil }
+
+    let matches = body.allRangesByVietnameseSearch(
+      of: query,
+      precomputedFoldedSelf: foldedSearchableBodyText,
+      maxMatches: 1
+    )
+    guard let firstMatch = matches.first else { return nil }
+
+    let contextBefore = 32
+    let contextAfter = 68
+    let winStart = body.index(firstMatch.lowerBound, offsetBy: -contextBefore, limitedBy: body.startIndex) ?? body.startIndex
+    let winEnd = body.index(firstMatch.upperBound, offsetBy: contextAfter, limitedBy: body.endIndex) ?? body.endIndex
+
+    var rawSlice = String(body[winStart..<winEnd])
+      .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !rawSlice.isEmpty else { return nil }
+
+    if winStart > body.startIndex {
+      rawSlice = "…" + rawSlice
+    }
+    if winEnd < body.endIndex {
+      rawSlice += "…"
+    }
+
+    var snippetAttr = AttributedString(rawSlice)
+    let snippetRanges = rawSlice.allRangesByVietnameseSearch(of: query, maxMatches: 8)
+    let snippetFont = Font.system(size: 11)
+    for range in snippetRanges {
+      if let lower = AttributedString.Index(range.lowerBound, within: snippetAttr),
+         let upper = AttributedString.Index(range.upperBound, within: snippetAttr) {
+        applyHighlightStyle(to: &snippetAttr, range: lower..<upper, baseFont: snippetFont)
+      }
+    }
+
+    return snippetAttr
   }
 
   private func synchronizeItemPin() {
@@ -322,6 +394,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
         self.title = self.item.title
         self._cachedPreviewText = nil
         self._cachedFoldedTitle = nil
+        self._cachedSearchableBodyText = nil
         self._cachedFoldedBodyText = nil
         self.synchronizeItemTitle()
       }

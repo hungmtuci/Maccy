@@ -41,15 +41,48 @@ nonisolated struct SyncDatabasePayload: Codable, Sendable {
   var items: [String: SyncedClipboardItem]
 }
 
+private nonisolated struct RawContentSlice: Sendable {
+  var type: String
+  var data: Data
+}
+
+private nonisolated struct LocalPushCandidate: Sendable {
+  var syncId: String
+  var title: String
+  var pin: String?
+  var application: String?
+  var firstCopiedAt: Date
+  var lastCopiedAt: Date
+  var numberOfCopies: Int
+  var updatedStamp: Date
+  var rawPayloads: [RawContentSlice]
+}
+
+private nonisolated struct DecodedRemoteItem: Sendable {
+  var syncId: String
+  var resolvedTitle: String
+  var pin: String?
+  var application: String?
+  var firstCopiedAt: Date
+  var lastCopiedAt: Date
+  var numberOfCopies: Int
+  var contents: [RawContentSlice]
+}
+
+private nonisolated struct RemoteDecodeOutcome: Sendable {
+  var decodedItems: [DecodedRemoteItem]
+  var hadDecryptionFailure: Bool
+}
+
 @Observable
 @MainActor
 class CloudSyncManager {
   static let shared = CloudSyncManager()
 
   private let logger = Logger(label: "org.p0deje.Maccy.CloudSync")
-  private static let syncFileName = "maccy-synced-items.json"
-  private static let maxSingleContentSyncBytes = 16 * 1024 * 1024 // 16 MB per content blob with external blob storage
-  private static let externalBlobThresholdBytes = 65_536 // Offload payloads > 64 KB to blobs/<syncId>_<idx>.blob
+  private nonisolated static let syncFileName = "maccy-synced-items.json"
+  private nonisolated static let maxSingleContentSyncBytes = 16 * 1024 * 1024 // 16 MB per content blob with external blob storage
+  private nonisolated static let externalBlobThresholdBytes = 65_536 // Offload payloads > 64 KB to blobs/<syncId>_<idx>.blob
 
   var isSyncing: Bool = false
   var filterOnlySynced: Bool = false {
@@ -68,6 +101,7 @@ class CloudSyncManager {
   private var pollTimer: Timer?
   private var lastObservedFileModificationDate: Date?
   private var isWritingSyncFile = false
+  private var pendingSyncRequested = false
   private var localUpdatedAtByHash: [String: Date] = [:]
   private var metadataByHash: [String: SyncItemMetadata] = [:]
 
@@ -315,10 +349,22 @@ class CloudSyncManager {
   }
 
   func handleItemPinned(_ decorator: HistoryItemDecorator) {
-    guard Defaults[.autoSyncPinnedItems] else { return }
-    if decorator.isPinned && !decorator.isSynced {
+    if decorator.isPinned && !decorator.isSynced && Defaults[.autoSyncPinnedItems] {
+      setSynced(true, for: [decorator], askForSecretConfirmation: false)
+    } else if decorator.isSynced {
       setSynced(true, for: [decorator], askForSecretConfirmation: false)
     }
+  }
+
+  func handleSyncedItemEdited(_ decorator: HistoryItemDecorator, previousSyncId: String) {
+    guard decorator.isSynced else { return }
+    let newSyncId = decorator.item.contentHash
+    if previousSyncId != newSyncId {
+      Defaults[.syncedItemHashes].remove(previousSyncId)
+      metadataByHash.removeValue(forKey: previousSyncId)
+      localUpdatedAtByHash[previousSyncId] = Date.now
+    }
+    setSynced(true, for: [decorator], askForSecretConfirmation: false)
   }
 
   func handleItemDeleted(_ item: HistoryItem) {
@@ -332,8 +378,9 @@ class CloudSyncManager {
     }
   }
 
-  /// Performs a two-way merge between local synced items and `<GoogleDrive>/maccy-synced-items.json`.
-  func syncNow() async {
+  /// Performs a two-way merge between local synced items and `<GoogleDrive>/maccy-synced-items.json`,
+  /// offloading compression, AES-256-GCM encryption, conflict-file merging, and blob GC to a background thread.
+  func syncNow() async { // swiftlint:disable:this function_body_length cyclomatic_complexity
     guard Defaults[.cloudSyncEnabled] else { return }
     if Defaults[.cloudSyncFolderPath].isEmpty {
       autoDetectGoogleDriveIfNeeded()
@@ -343,22 +390,45 @@ class CloudSyncManager {
       return
     }
 
-    let folderURL = fileURL.deletingLastPathComponent()
-    let blobsURL = folderURL.appendingPathComponent("blobs", isDirectory: true)
-    do {
-      try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-      try FileManager.default.createDirectory(at: blobsURL, withIntermediateDirectories: true)
-    } catch {
-      lastSyncError = "Không thể tạo thư mục: \(error.localizedDescription)"
+    if isSyncing {
+      pendingSyncRequested = true
       return
     }
 
     isSyncing = true
-    defer { isSyncing = false }
+    defer {
+      isSyncing = false
+      if pendingSyncRequested {
+        pendingSyncRequested = false
+        Task { @MainActor in
+          await self.syncNow()
+        }
+      }
+    }
 
+    let folderURL = fileURL.deletingLastPathComponent()
+    let blobsURL = folderURL.appendingPathComponent("blobs", isDirectory: true)
     let deviceName = Host.current().localizedName ?? "Mac"
     let encryptionKey = currentEncryptionKey
-    var database = readDatabase(from: fileURL) ?? SyncDatabasePayload(updatedAt: Date.now, items: [:])
+
+    // Phase 1 (Background): Create directories, read primary JSON + merge any Google Drive conflict copies
+    let loadResult: Result<(database: SyncDatabasePayload, conflictURLs: [URL]), Error> = await Task.detached(priority: .utility) {
+      try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+      try FileManager.default.createDirectory(at: blobsURL, withIntermediateDirectories: true)
+      return Self.loadAndMergeDatabases(primaryURL: fileURL, folderURL: folderURL)
+    }.result
+
+    var database: SyncDatabasePayload
+    let conflictURLsToClean: [URL]
+    switch loadResult {
+    case .success(let loaded):
+      database = loaded.database
+      conflictURLsToClean = loaded.conflictURLs
+    case .failure(let error):
+      lastSyncError = "Không thể truy cập thư mục đồng bộ: \(error.localizedDescription)"
+      return
+    }
+
     var hashes = Defaults[.syncedItemHashes]
     let allLocalDecorators = AppState.shared.history.allDecorators
     var localByHash: [String: HistoryItemDecorator] = [:]
@@ -380,8 +450,9 @@ class CloudSyncManager {
     }
 
     var localHistoryChanged = false
+    var remoteItemsToDecode: [SyncedClipboardItem] = []
 
-    // 1. Merge remote items into local History
+    // Phase 2 (@MainActor): Reconcile metadata & identify remote items to import
     for (syncId, remoteItem) in database.items {
       let localStamp = localUpdatedAtByHash[syncId] ?? .distantPast
       if remoteItem.isDeleted {
@@ -401,10 +472,8 @@ class CloudSyncManager {
         updatedAt: remoteItem.updatedAt
       )
 
-      // Remote item is active (!isDeleted)
       if let localDecorator = localByHash[syncId] {
         if !hashes.contains(syncId) {
-          // If locally unsynced more recently than remote update, mark remote as deleted
           if localStamp > remoteItem.updatedAt {
             var tombstone = remoteItem
             tombstone.isDeleted = true
@@ -419,10 +488,24 @@ class CloudSyncManager {
             localHistoryChanged = true
           }
         }
+
+        // Propagate remote Alias (title) or Pin edits if remote is newer than local edit stamp
+        if remoteItem.updatedAt > localStamp {
+          let remoteTitle = Self.resolveDecryptedTitle(of: remoteItem, encryptionKey: encryptionKey)
+          if !remoteTitle.isEmpty, !remoteTitle.hasPrefix("🔒"), localDecorator.item.title != remoteTitle {
+            localDecorator.item.title = remoteTitle
+            localDecorator.title = remoteTitle
+            localHistoryChanged = true
+          }
+          if let remotePin = remoteItem.pin,
+             localDecorator.item.pin != remotePin,
+             History.shared.availablePins.contains(remotePin) {
+            History.shared.updatePin(localDecorator.item, to: remotePin)
+            localHistoryChanged = true
+          }
+        }
       } else {
-        // Remote item does not exist locally yet -> import into Maccy History!
         if localStamp > remoteItem.updatedAt {
-          // Locally deleted/unsynced more recently
           var tombstone = remoteItem
           tombstone.isDeleted = true
           tombstone.updatedAt = localStamp
@@ -431,64 +514,68 @@ class CloudSyncManager {
           metadataByHash.removeValue(forKey: syncId)
           continue
         }
+        remoteItemsToDecode.append(remoteItem)
+      }
+    }
 
-        if let importedDecorator = importRemoteItem(remoteItem, folderURL: folderURL, encryptionKey: encryptionKey) {
-          hashes.insert(syncId)
+    // Phase 3 (Background): Decrypt & decompress new remote items off the main thread
+    if !remoteItemsToDecode.isEmpty {
+      let decodeOutcome = await Task.detached(priority: .utility) {
+        Self.decodeRemoteItems(remoteItemsToDecode, folderURL: folderURL, encryptionKey: encryptionKey)
+      }.value
+
+      if decodeOutcome.hadDecryptionFailure {
+        lastSyncError = "Cần nhập đúng Mật khẩu mã hoá trong Cài đặt Google Drive để giải mã mục đồng bộ"
+      }
+
+      for decoded in decodeOutcome.decodedItems {
+        if let importedDecorator = finishImportingDecodedItem(decoded) {
+          hashes.insert(decoded.syncId)
           importedDecorator.isSynced = true
-          localByHash[syncId] = importedDecorator
+          localByHash[decoded.syncId] = importedDecorator
           localHistoryChanged = true
         }
       }
     }
 
-    // 2. Push local synced items into database
+    // Collect local items that need pushing to Google Drive
+    var pushCandidates: [LocalPushCandidate] = []
     for syncId in hashes {
       guard let decorator = localByHash[syncId] else { continue }
       let item = decorator.item
       let existingRemote = database.items[syncId]
       let localStamp = localUpdatedAtByHash[syncId] ?? item.lastCopiedAt
+      let existingRemoteTitle = existingRemote.map { Self.resolveDecryptedTitle(of: $0, encryptionKey: encryptionKey) }
 
-      if existingRemote == nil || existingRemote?.isDeleted == true || localStamp > (existingRemote?.updatedAt ?? .distantPast) || existingRemote?.pin != item.pin {
-        let payloadContents = buildSyncContents(
-          for: item,
-          syncId: syncId,
-          folderURL: folderURL,
-          encryptionKey: encryptionKey
-        )
-        let encryptedTitleData: Data?
-        let plainTitle: String
-        if let key = encryptionKey, let titleData = item.title.data(using: .utf8),
-           let sealed = try? AES.GCM.seal(titleData, using: key).combined {
-          encryptedTitleData = sealed
-          plainTitle = "🔒 [Đã mã hoá AES-256]"
-        } else {
-          encryptedTitleData = nil
-          plainTitle = item.title
-        }
+      let needsPush = existingRemote == nil
+        || existingRemote?.isDeleted == true
+        || localStamp > (existingRemote?.updatedAt ?? .distantPast)
+        || existingRemote?.pin != item.pin
+        || (existingRemoteTitle != nil && existingRemoteTitle != item.title && !item.title.isEmpty)
 
+      if needsPush {
+        let rawPayloads = extractRawPayloads(for: item)
         let updatedStamp = max(localStamp, Date.now)
-        let syncedItem = SyncedClipboardItem(
-          syncId: syncId,
-          title: plainTitle,
-          encryptedTitle: encryptedTitleData,
-          pin: item.pin,
-          application: item.application,
-          firstCopiedAt: item.firstCopiedAt,
-          lastCopiedAt: item.lastCopiedAt,
-          numberOfCopies: item.numberOfCopies,
-          updatedAt: updatedStamp,
-          isDeleted: false,
-          deviceName: deviceName,
-          contents: payloadContents
+        pushCandidates.append(
+          LocalPushCandidate(
+            syncId: syncId,
+            title: item.title,
+            pin: item.pin,
+            application: item.application,
+            firstCopiedAt: item.firstCopiedAt,
+            lastCopiedAt: item.lastCopiedAt,
+            numberOfCopies: item.numberOfCopies,
+            updatedStamp: updatedStamp,
+            rawPayloads: rawPayloads
+          )
         )
-        database.items[syncId] = syncedItem
         if metadataByHash[syncId] == nil {
           metadataByHash[syncId] = SyncItemMetadata(deviceName: deviceName, updatedAt: updatedStamp)
         }
       }
     }
 
-    // 3. Mark any previously synced remote items that were unsynced locally
+    // Mark any previously synced remote items that were unsynced or deleted locally
     for (syncId, localStamp) in localUpdatedAtByHash where !hashes.contains(syncId) {
       if var remote = database.items[syncId], !remote.isDeleted, localStamp >= remote.updatedAt {
         remote.isDeleted = true
@@ -502,53 +589,108 @@ class CloudSyncManager {
     Defaults[.syncedItemHashes] = hashes
 
     if localHistoryChanged {
+      try? Storage.shared.context.save()
       AppState.shared.history.refreshSyncFilter()
     }
 
-    // 4. Write updated database back to Google Drive folder
-    database.updatedAt = Date.now
-    do {
-      isWritingSyncFile = true
-      defer { isWritingSyncFile = false }
+    // Phase 4 (Background): LZFSE compress, AES-256-GCM encrypt, write blobs, write JSON, clean conflicts & orphan blobs
+    isWritingSyncFile = true
+    let finalSnapshot = database
+    let candidatesSnapshot = pushCandidates
+    let writeResult: Result<Date?, Error> = await Task.detached(priority: .utility) {
+      var updatedDB = finalSnapshot
+
+      for candidate in candidatesSnapshot {
+        let payloadContents = Self.encodeSyncContents(
+          rawPayloads: candidate.rawPayloads,
+          syncId: candidate.syncId,
+          folderURL: folderURL,
+          encryptionKey: encryptionKey
+        )
+        let encryptedTitleData: Data?
+        let plainTitle: String
+        if let key = encryptionKey,
+           let titleData = candidate.title.data(using: .utf8),
+           let sealed = try? AES.GCM.seal(titleData, using: key).combined {
+          encryptedTitleData = sealed
+          plainTitle = "🔒 [Đã mã hoá AES-256]"
+        } else {
+          encryptedTitleData = nil
+          plainTitle = candidate.title
+        }
+
+        updatedDB.items[candidate.syncId] = SyncedClipboardItem(
+          syncId: candidate.syncId,
+          title: plainTitle,
+          encryptedTitle: encryptedTitleData,
+          pin: candidate.pin,
+          application: candidate.application,
+          firstCopiedAt: candidate.firstCopiedAt,
+          lastCopiedAt: candidate.lastCopiedAt,
+          numberOfCopies: candidate.numberOfCopies,
+          updatedAt: candidate.updatedStamp,
+          isDeleted: false,
+          deviceName: deviceName,
+          contents: payloadContents
+        )
+      }
+
+      // Prune tombstones older than 30 days to keep JSON compact permanently
+      let tombstoneCutoff = Date.now.addingTimeInterval(-30 * 86_400)
+      updatedDB.items = updatedDB.items.filter { _, item in
+        !item.isDeleted || item.updatedAt >= tombstoneCutoff
+      }
+      updatedDB.updatedAt = Date.now
 
       let encoder = JSONEncoder()
       encoder.dateEncodingStrategy = .iso8601
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-      let data = try encoder.encode(database)
+      let data = try encoder.encode(updatedDB)
       try data.write(to: fileURL, options: [.atomic])
 
-      if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
-         let modDate = attrs[.modificationDate] as? Date {
-        lastObservedFileModificationDate = modDate
+      // Clean up merged Google Drive conflict files (e.g. "maccy-synced-items (1).json")
+      for conflictURL in conflictURLsToClean where conflictURL != fileURL {
+        try? FileManager.default.removeItem(at: conflictURL)
       }
 
+      // Garbage-collect orphaned external blob files in `blobs/`
+      Self.cleanupOrphanedBlobs(in: folderURL, database: updatedDB)
+
+      let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+      return attrs?[.modificationDate] as? Date
+    }.result
+
+    isWritingSyncFile = false
+    switch writeResult {
+    case .success(let modDate):
+      if let modDate {
+        lastObservedFileModificationDate = modDate
+      }
       let now = Date.now
       lastSyncDate = now
       Defaults[.lastCloudSyncAt] = now
-      lastSyncError = nil
-      statusMessage = "Đã đồng bộ \(hashes.count) mục"
-    } catch {
+      if lastSyncError?.contains("Mật khẩu mã hoá") != true {
+        lastSyncError = nil
+      }
+      let mergedNote = conflictURLsToClean.isEmpty ? "" : " (đã gộp \(conflictURLsToClean.count) bản xung đột)"
+      statusMessage = "Đã đồng bộ \(hashes.count) mục\(mergedNote)"
+    case .failure(let error):
       lastSyncError = "Lỗi ghi file đồng bộ: \(error.localizedDescription)"
       logger.error("Failed to write Google Drive sync file: \(error.localizedDescription)")
     }
   }
 
-  private func buildSyncContents(
-    for item: HistoryItem,
-    syncId: String,
-    folderURL: URL,
-    encryptionKey: SymmetricKey?
-  ) -> [SyncedContentPayload] {
+  private func extractRawPayloads(for item: HistoryItem) -> [RawContentSlice] {
     let nonTransient = item.contents.filter { !HistoryItem.transientTypes.contains($0.type) }
-    var rawPayloads: [(type: String, data: Data)] = []
+    var rawPayloads: [RawContentSlice] = []
 
     for content in nonTransient {
       guard let data = content.value, !data.isEmpty else { continue }
       if data.count <= Self.maxSingleContentSyncBytes {
-        rawPayloads.append((content.type, data))
+        rawPayloads.append(RawContentSlice(type: content.type, data: data))
       } else if content.type == NSPasteboard.PasteboardType.string.rawValue,
                 let truncated = data.utf8PrefixString(maxBytes: Self.maxSingleContentSyncBytes)?.data(using: .utf8) {
-        rawPayloads.append((content.type, truncated))
+        rawPayloads.append(RawContentSlice(type: content.type, data: truncated))
       }
     }
 
@@ -559,12 +701,21 @@ class CloudSyncManager {
          let rep = NSBitmapImageRep(data: tiff),
          let pngData = rep.representation(using: .png, properties: [:]),
          pngData.count <= Self.maxSingleContentSyncBytes {
-        rawPayloads.append((NSPasteboard.PasteboardType.png.rawValue, pngData))
+        rawPayloads.append(RawContentSlice(type: NSPasteboard.PasteboardType.png.rawValue, data: pngData))
       } else if let textData = item.title.data(using: .utf8) {
-        rawPayloads.append((NSPasteboard.PasteboardType.string.rawValue, textData))
+        rawPayloads.append(RawContentSlice(type: NSPasteboard.PasteboardType.string.rawValue, data: textData))
       }
     }
 
+    return rawPayloads
+  }
+
+  private nonisolated static func encodeSyncContents(
+    rawPayloads: [RawContentSlice],
+    syncId: String,
+    folderURL: URL,
+    encryptionKey: SymmetricKey?
+  ) -> [SyncedContentPayload] {
     var result: [SyncedContentPayload] = []
     for (idx, raw) in rawPayloads.enumerated() {
       var processedData = raw.data
@@ -618,69 +769,102 @@ class CloudSyncManager {
     return result
   }
 
-  private func importRemoteItem(
-    _ remote: SyncedClipboardItem,
-    folderURL: URL,
+  private nonisolated static func resolveDecryptedTitle(
+    of remote: SyncedClipboardItem,
     encryptionKey: SymmetricKey?
-  ) -> HistoryItemDecorator? {
-    var contents: [HistoryItemContent] = []
-
-    for payload in remote.contents {
-      var data = payload.value
-      if let relPath = payload.blobFileName, !relPath.isEmpty {
-        let blobURL = folderURL.appendingPathComponent(relPath, isDirectory: false)
-        guard let fileData = try? Data(contentsOf: blobURL) else {
-          continue
-        }
-        data = fileData
-      }
-
-      if payload.isEncrypted == true {
-        guard let key = encryptionKey,
-              let box = try? AES.GCM.SealedBox(combined: data),
-              let opened = try? AES.GCM.open(box, using: key) else {
-          lastSyncError = "Cần nhập đúng Mật khẩu mã hoá trong Cài đặt Google Drive để giải mã mục đồng bộ"
-          return nil
-        }
-        data = opened
-      }
-
-      if payload.isCompressed == true {
-        if let decompressed = try? (data as NSData).decompressed(using: .lzfse) as Data {
-          data = decompressed
-        }
-      }
-
-      contents.append(HistoryItemContent(type: payload.type, value: data))
-    }
-
-    guard !contents.isEmpty else { return nil }
-
-    let newItem = HistoryItem(contents: contents)
-    newItem.application = remote.application
-    newItem.firstCopiedAt = remote.firstCopiedAt
-    newItem.lastCopiedAt = remote.lastCopiedAt
-    newItem.numberOfCopies = max(1, remote.numberOfCopies)
-
-    var resolvedTitle = remote.title
+  ) -> String {
     if let encTitle = remote.encryptedTitle,
        let key = encryptionKey,
        let box = try? AES.GCM.SealedBox(combined: encTitle),
        let opened = try? AES.GCM.open(box, using: key),
        let str = String(data: opened, encoding: .utf8) {
-      resolvedTitle = str
+      return str
     }
-    newItem.title = (resolvedTitle.isEmpty || resolvedTitle.hasPrefix("🔒")) ? newItem.generateTitle() : resolvedTitle
+    return remote.title
+  }
 
-    if let remotePin = remote.pin,
+  private nonisolated static func decodeRemoteItems(
+    _ remotes: [SyncedClipboardItem],
+    folderURL: URL,
+    encryptionKey: SymmetricKey?
+  ) -> RemoteDecodeOutcome {
+    var decodedItems: [DecodedRemoteItem] = []
+    var hadDecryptionFailure = false
+
+    for remote in remotes {
+      var slices: [RawContentSlice] = []
+      var itemFailedDecryption = false
+
+      for payload in remote.contents {
+        var data = payload.value
+        if let relPath = payload.blobFileName, !relPath.isEmpty {
+          let blobURL = folderURL.appendingPathComponent(relPath, isDirectory: false)
+          guard let fileData = try? Data(contentsOf: blobURL) else {
+            continue
+          }
+          data = fileData
+        }
+
+        if payload.isEncrypted == true {
+          guard let key = encryptionKey,
+                let box = try? AES.GCM.SealedBox(combined: data),
+                let opened = try? AES.GCM.open(box, using: key) else {
+            hadDecryptionFailure = true
+            itemFailedDecryption = true
+            break
+          }
+          data = opened
+        }
+
+        if payload.isCompressed == true,
+           let decompressed = try? (data as NSData).decompressed(using: .lzfse) as Data {
+          data = decompressed
+        }
+
+        slices.append(RawContentSlice(type: payload.type, data: data))
+      }
+
+      guard !itemFailedDecryption, !slices.isEmpty else { continue }
+      let resolvedTitle = resolveDecryptedTitle(of: remote, encryptionKey: encryptionKey)
+      decodedItems.append(
+        DecodedRemoteItem(
+          syncId: remote.syncId,
+          resolvedTitle: resolvedTitle,
+          pin: remote.pin,
+          application: remote.application,
+          firstCopiedAt: remote.firstCopiedAt,
+          lastCopiedAt: remote.lastCopiedAt,
+          numberOfCopies: remote.numberOfCopies,
+          contents: slices
+        )
+      )
+    }
+
+    return RemoteDecodeOutcome(decodedItems: decodedItems, hadDecryptionFailure: hadDecryptionFailure)
+  }
+
+  private func finishImportingDecodedItem(_ decoded: DecodedRemoteItem) -> HistoryItemDecorator? {
+    let contents = decoded.contents.map { HistoryItemContent(type: $0.type, value: $0.data) }
+    guard !contents.isEmpty else { return nil }
+
+    let newItem = HistoryItem(contents: contents)
+    newItem.application = decoded.application
+    newItem.firstCopiedAt = decoded.firstCopiedAt
+    newItem.lastCopiedAt = decoded.lastCopiedAt
+    newItem.numberOfCopies = max(1, decoded.numberOfCopies)
+    newItem.title = (decoded.resolvedTitle.isEmpty || decoded.resolvedTitle.hasPrefix("🔒"))
+      ? newItem.generateTitle()
+      : decoded.resolvedTitle
+
+    if let remotePin = decoded.pin,
        History.shared.availablePins.contains(remotePin) {
       newItem.pin = remotePin
     }
 
-    return History.shared.addSyncedItemFromCloud(newItem, syncId: remote.syncId)
+    return History.shared.addSyncedItemFromCloud(newItem, syncId: decoded.syncId)
   }
 
-  private func readDatabase(from url: URL) -> SyncDatabasePayload? {
+  private nonisolated static func readDatabase(from url: URL) -> SyncDatabasePayload? {
     guard FileManager.default.fileExists(atPath: url.path),
           let data = try? Data(contentsOf: url),
           !data.isEmpty else {
@@ -689,6 +873,96 @@ class CloudSyncManager {
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .iso8601
     return try? decoder.decode(SyncDatabasePayload.self, from: data)
+  }
+
+  /// Detects Google Drive conflict files (`maccy-synced-items (1).json`, `maccy-synced-items (conflict).json`, etc.)
+  nonisolated static func findConflictDatabaseURLs(in folderURL: URL) -> [URL] {
+    guard let urls = try? FileManager.default.contentsOfDirectory(
+      at: folderURL,
+      includingPropertiesForKeys: nil,
+      options: [.skipsHiddenFiles]
+    ) else {
+      return []
+    }
+
+    return urls.filter { url in
+      let name = url.lastPathComponent
+      return name != syncFileName
+        && name.lowercased().hasPrefix("maccy-synced-items")
+        && url.pathExtension.lowercased() == "json"
+    }
+  }
+
+  /// Reads the primary sync file and merges any Google Drive conflict copies by `updatedAt` timestamp.
+  nonisolated static func loadAndMergeDatabases(
+    primaryURL: URL,
+    folderURL: URL
+  ) -> (database: SyncDatabasePayload, conflictURLs: [URL]) {
+    var merged = readDatabase(from: primaryURL) ?? SyncDatabasePayload(updatedAt: Date.now, items: [:])
+    let candidates = findConflictDatabaseURLs(in: folderURL)
+    var decodedConflicts: [URL] = []
+
+    for conflictURL in candidates {
+      guard let conflictDB = readDatabase(from: conflictURL) else { continue }
+      decodedConflicts.append(conflictURL)
+      for (syncId, conflictItem) in conflictDB.items {
+        if let existing = merged.items[syncId] {
+          if conflictItem.updatedAt > existing.updatedAt {
+            merged.items[syncId] = conflictItem
+          }
+        } else {
+          merged.items[syncId] = conflictItem
+        }
+      }
+    }
+
+    return (merged, decodedConflicts)
+  }
+
+  /// Removes external `.blob` files belonging to deleted items or unreferenced blobs older than 5 minutes.
+  nonisolated static func cleanupOrphanedBlobs(in folderURL: URL, database: SyncDatabasePayload) {
+    let blobsURL = folderURL.appendingPathComponent("blobs", isDirectory: true)
+    guard let blobFiles = try? FileManager.default.contentsOfDirectory(
+      at: blobsURL,
+      includingPropertiesForKeys: [.contentModificationDateKey],
+      options: [.skipsHiddenFiles]
+    ) else {
+      return
+    }
+
+    var activeRelativePaths = Set<String>()
+    var deletedPrefixes = Set<String>()
+    for (syncId, item) in database.items {
+      if item.isDeleted {
+        deletedPrefixes.insert("\(syncId)_")
+      } else {
+        for payload in item.contents {
+          if let rel = payload.blobFileName, !rel.isEmpty {
+            activeRelativePaths.insert(rel)
+          }
+        }
+      }
+    }
+
+    let now = Date.now
+    for fileURL in blobFiles where fileURL.pathExtension.lowercased() == "blob" {
+      let fileName = fileURL.lastPathComponent
+      let relPath = "blobs/\(fileName)"
+      if activeRelativePaths.contains(relPath) {
+        continue
+      }
+
+      if deletedPrefixes.contains(where: { fileName.hasPrefix($0) }) {
+        try? FileManager.default.removeItem(at: fileURL)
+        continue
+      }
+
+      if let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+         let modDate = values.contentModificationDate,
+         now.timeIntervalSince(modDate) > 300 {
+        try? FileManager.default.removeItem(at: fileURL)
+      }
+    }
   }
 
   private func startPollingTimer() {
@@ -702,6 +976,16 @@ class CloudSyncManager {
 
   private func checkRemoteFileChangesIfNeeded() {
     guard isEnabled, !isWritingSyncFile, !isSyncing, let fileURL = syncFileURL else { return }
+    let folderURL = fileURL.deletingLastPathComponent()
+
+    // Trigger sync immediately if Google Drive Desktop created a conflict file (e.g. "maccy-synced-items (1).json")
+    if !Self.findConflictDatabaseURLs(in: folderURL).isEmpty {
+      Task {
+        await syncNow()
+      }
+      return
+    }
+
     guard FileManager.default.fileExists(atPath: fileURL.path),
           let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
           let modDate = attrs[.modificationDate] as? Date else {

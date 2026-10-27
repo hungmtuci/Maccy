@@ -5,7 +5,24 @@ import SwiftUI
 struct PreviewItemView: View {
   private static let largeTextThreshold = 1_000
 
+  @Environment(AppState.self) private var appState
   var item: HistoryItemDecorator
+
+  private func highlightedSmallPreview(text: String, query: String) -> AttributedString {
+    var attr = AttributedString(text)
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !text.isEmpty else { return attr }
+
+    let matches = text.allRangesByVietnameseSearch(of: trimmed, maxMatches: 40)
+    for range in matches {
+      if let lower = AttributedString.Index(range.lowerBound, within: attr),
+         let upper = AttributedString.Index(range.upperBound, within: attr) {
+        attr[lower..<upper].backgroundColor = .findHighlightColor
+        attr[lower..<upper].foregroundColor = .black
+      }
+    }
+    return attr
+  }
 
   @ViewBuilder
   func previewImage(content: () -> some View) -> some View {
@@ -54,13 +71,22 @@ struct PreviewItemView: View {
         }
       } else {
         if item.previewText.byteCount >= Self.largeTextThreshold {
-          LargeTextView(text: item.previewText.string)
+          LargeTextView(
+            text: item.previewText.string,
+            highlightQuery: appState.history.searchQuery
+          )
             .id("textpreview-\(item.id)")
         } else {
           ScrollView {
-            Text(item.previewText.string)
-              .font(.body)
-              .frame(maxWidth: .infinity, alignment: .leading)
+            if appState.history.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+              Text(item.previewText.string)
+                .font(.body)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+              Text(highlightedSmallPreview(text: item.previewText.string, query: appState.history.searchQuery))
+                .font(.body)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
           }
           .frame(maxWidth: .infinity)
         }

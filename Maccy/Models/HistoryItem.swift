@@ -317,12 +317,13 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     let pasteboardImageData = contentData(Self.imageTypes)
     let universalClipboardImageURL = universalClipboardImage ? fileURLs.first : nil
     guard pasteboardImageData == nil && universalClipboardImageURL == nil else {
-      Task {
+      Task { @MainActor in
         if let recognizedText = await Self.recognizeText(
           imageData: pasteboardImageData,
           fileURL: universalClipboardImageURL
-        ) {
+        ), !recognizedText.isEmpty {
           self.title = recognizedText
+          try? Storage.shared.context.save()
         }
       }
       return ""
@@ -512,6 +513,16 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     let requestHandler = VNImageRequestHandler(data: data)
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+    if let supported = try? request.supportedRecognitionLanguages() {
+      // Note: Apple Vision uses "vi-VT" for Vietnamese in VNRecognizeTextRequest; match any "vi*" code dynamically!
+      let vietnameseCodes = supported.filter { $0.lowercased().hasPrefix("vi") }
+      let englishCodes = supported.filter { $0 == "en-US" }
+      let preferred = vietnameseCodes + englishCodes
+      if !preferred.isEmpty {
+        request.recognitionLanguages = preferred
+      }
+    }
     request.automaticallyDetectsLanguage = true
 
     do {

@@ -189,36 +189,47 @@ struct ItemEditorView: View {
   }
 
   private func applyChanges() {
+    let previousSyncId = item.item.contentHash
+    var anyChangeApplied = false
+
     if !item.hasImage && editableTitle != item.item.title {
       item.item.title = editableTitle
       item.title = editableTitle
+      item.invalidatePreviewText()
+      anyChangeApplied = true
     }
 
-    if let selectedPin {
+    if let selectedPin, selectedPin != item.item.pin {
       appState.history.updatePin(item.item, to: selectedPin)
+      anyChangeApplied = true
     }
 
-    guard isTextContent || isRichText else { return }
-    guard editableContent.hasChanges,
-          let data = editableContent.text.data(using: .utf8) else { return }
+    if (isTextContent || isRichText),
+       editableContent.hasChanges,
+       let data = editableContent.text.data(using: .utf8) {
+      let historyItem = item.item
+      let stringType = NSPasteboard.PasteboardType.string.rawValue
+      historyItem.contents.removeAll { $0.type != stringType }
 
-    let historyItem = item.item
-    let stringType = NSPasteboard.PasteboardType.string.rawValue
-    historyItem.contents.removeAll { $0.type != stringType }
-
-    if let index = historyItem.contents.firstIndex(where: {
-      $0.type == stringType
-    }) {
-      historyItem.contents[index].value = data
-    } else {
-      historyItem.contents.append(
-        HistoryItemContent(type: stringType, value: data)
-      )
+      if let index = historyItem.contents.firstIndex(where: {
+        $0.type == stringType
+      }) {
+        historyItem.contents[index].value = data
+      } else {
+        historyItem.contents.append(
+          HistoryItemContent(type: stringType, value: data)
+        )
+      }
+      historyItem.invalidateContentCache()
+      item.invalidatePreviewText()
+      anyChangeApplied = true
     }
-    historyItem.invalidateContentCache()
-    item.invalidatePreviewText()
+
+    guard anyChangeApplied else { return }
+
+    try? Storage.shared.context.save()
     if item.isSynced {
-      CloudSyncManager.shared.setSynced(true, for: [item])
+      CloudSyncManager.shared.handleSyncedItemEdited(item, previousSyncId: previousSyncId)
     }
   }
 
