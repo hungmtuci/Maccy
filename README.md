@@ -91,8 +91,16 @@ Phiên bản này giữ nguyên triết lý gọn nhẹ của Maccy gốc, đồ
 - **Tự động hóa Script & Giả lập bàn phím**: Chạy `Shell Script`, `AppleScript`, `JavaScript (JXA)`, đặt vị trí con trỏ sau khi chèn (`{{cursor}}`), và giả lập phím `{{tab}}`, `{{enter}}`, `{{esc}}`, `{{delay:200}}` để tự điền biểu mẫu nhiều ô.
 - **Nhập dữ liệu 1-chạm từ Typinator & Alfred Snippets + Đồng bộ Google Drive**: Nhập trực tiếp toàn bộ các Bộ (Sets) từ **Typinator** và **Alfred Snippets** (`.alfredsnippets`, `.json`, `.csv`), đi kèm các gói mẫu Ký hiệu Học thuật & AutoCorrect, tự tạm dừng trong ô mật khẩu (`Secure Input`), và đồng bộ hai chiều qua Google Drive (`maccy-snippets.json` hỗ trợ mã hóa AES-256-GCM).
 
-### 6. 🛠️ Hướng dẫn tự biên dịch nhanh (`build_maccy.sh`)
-Hỗ trợ biên dịch trực tiếp bằng Swift Package Manager / CommandLineTools mà không bắt buộc cài đặt toàn bộ Xcode:
+### 6. 📦 Cài đặt trên máy Mac khác & Tự biên dịch (`build_maccy.sh`)
+- **Cài đặt nhanh từ bản phát hành sẵn (Universal Binary `arm64` + `x86_64`)**:
+  1. Tải gói `Maccy-v3.0.1-custom.zip` mới nhất tại **[GitHub Releases (`hungmtuci/Maccy`)](https://github.com/hungmtuci/Maccy/releases/latest)**.
+  2. Giải nén và kéo `Maccy.app` vào `/Applications` (chọn **Replace** nếu đã có bản cũ).
+  3. Gỡ cờ cách ly Gatekeeper (do bản cá nhân ký ad-hoc) và khởi chạy:
+     ```sh
+     xattr -cr /Applications/Maccy.app
+     open /Applications/Maccy.app
+     ```
+- **Tự biên dịch từ mã nguồn** (hỗ trợ biên dịch trực tiếp bằng Swift Package Manager / CommandLineTools):
 ```sh
 chmod +x build_maccy.sh
 ./build_maccy.sh

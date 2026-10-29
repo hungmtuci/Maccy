@@ -42,14 +42,26 @@ final class TextExpansionEngine {
     guard keyDownMonitor == nil else { return }
 
     keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-      MainActor.assumeIsolated {
-        self?.handleGlobalKeyDown(event)
+      if Thread.isMainThread {
+        MainActor.assumeIsolated {
+          self?.handleGlobalKeyDown(event)
+        }
+      } else {
+        DispatchQueue.main.async { [weak self] in
+          self?.handleGlobalKeyDown(event)
+        }
       }
     }
 
     mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-      MainActor.assumeIsolated {
-        self?.typingBuffer = ""
+      if Thread.isMainThread {
+        MainActor.assumeIsolated {
+          self?.typingBuffer = ""
+        }
+      } else {
+        DispatchQueue.main.async { [weak self] in
+          self?.typingBuffer = ""
+        }
       }
     }
 

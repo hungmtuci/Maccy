@@ -8,25 +8,46 @@ if [ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk" ]; then
   export SDKROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
 fi
 export PATH="$HOME/.local/bin:$PROJECT_DIR:$PATH"
+export COPYFILE_DISABLE=1
 
 APP_NAME="Maccy"
 BUNDLE_ID="org.p0deje.Maccy"
-VERSION="3.0.0-custom"
+VERSION="3.0.1-custom"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 WORKSPACE_APP_BUNDLE="$(dirname "$PROJECT_DIR")/$APP_NAME.app"
-CONTENTS_DIR="$APP_BUNDLE/Contents"
+
+STAGE_DIR="/tmp/maccy_stage_$$"
+STAGE_APP="$STAGE_DIR/$APP_NAME.app"
+CONTENTS_DIR="$STAGE_APP/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
-echo "==> [1/5] Đang biên dịch $APP_NAME (Release)..."
+echo "==> [1/5] Đang biên dịch $APP_NAME Universal (arm64 + x86_64, SwiftBuild Release)..."
 find "$PROJECT_DIR" -not -path '*/.git/*' -not -path '*/.build/*' -name '* 2*' -delete 2>/dev/null || true
-swift build --build-system native -c release --product "$APP_NAME"
-BIN_PATH="$(swift build --build-system native -c release --product "$APP_NAME" --show-bin-path)/$APP_NAME"
+
+# IMPORTANT: Never pass `--build-system native`! The legacy build system hardcodes local `.build` paths
+# into `Bundle.module` (`resource_bundle_accessor.swift`) instead of checking `Bundle.main.resourceURL`,
+# which causes an immediate fatalError crash when launching the `.app` on any other Mac!
+SWIFTC_COMPAT_FLAGS=(
+  -Xswiftc -runtime-compatibility-version -Xswiftc none
+  -Xswiftc -disable-autolinking-runtime-compatibility
+  -Xswiftc -disable-autolinking-runtime-compatibility-concurrency
+  -Xswiftc -disable-autolinking-runtime-compatibility-dynamic-replacements
+)
+
+if swift build -c release --arch arm64 --arch x86_64 --product "$APP_NAME" "${SWIFTC_COMPAT_FLAGS[@]}"; then
+  BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --product "$APP_NAME" "${SWIFTC_COMPAT_FLAGS[@]}" --show-bin-path)"
+else
+  echo "    (Fallback biên dịch kiến trúc gốc arm64...)"
+  swift build -c release --product "$APP_NAME"
+  BIN_DIR="$(swift build -c release --product "$APP_NAME" --show-bin-path)"
+fi
+BIN_PATH="$BIN_DIR/$APP_NAME"
 
 echo "==> [2/5] Đang tạo AppIcon.icns từ Assets.xcassets..."
-ICONSET_DIR="$PROJECT_DIR/.build/AppIcon.iconset"
-rm -rf "$ICONSET_DIR"
-mkdir -p "$ICONSET_DIR"
+ICONSET_DIR="/tmp/maccy_iconset_$$.iconset"
+rm -rf "$ICONSET_DIR" "$STAGE_DIR"
+mkdir -p "$ICONSET_DIR" "$MACOS_DIR" "$RESOURCES_DIR"
 
 APPICON_SRC="$PROJECT_DIR/Maccy/Assets.xcassets/AppIcon.appiconset"
 cp "$APPICON_SRC/AppIcon (Big Sur)-16w.png" "$ICONSET_DIR/icon_16x16.png" 2>/dev/null || true
@@ -40,19 +61,16 @@ cp "$APPICON_SRC/AppIcon (Big Sur)-512w.png" "$ICONSET_DIR/icon_256x256@2x.png" 
 cp "$APPICON_SRC/AppIcon (Big Sur)-512w-1.png" "$ICONSET_DIR/icon_512x512.png" 2>/dev/null || true
 cp "$APPICON_SRC/AppIcon (Big Sur)-1024w.png" "$ICONSET_DIR/icon_512x512@2x.png" 2>/dev/null || true
 
-echo "==> [3/5] Đang đóng gói $APP_NAME.app và tài nguyên đa ngôn ngữ..."
-rm -rf "$APP_BUNDLE"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-
+echo "==> [3/5] Đang đóng gói $APP_NAME.app chuẩn macOS trong /tmp (tránh FinderInfo xattr)..."
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns" || true
+rm -rf "$ICONSET_DIR"
 
-# Copy SwiftPM resource bundles (e.g. KeyboardShortcuts_KeyboardShortcuts.bundle)
-BIN_DIR="$(dirname "$BIN_PATH")"
+# Copy SwiftBuild resource bundles (Contents/Info.plist format) into Contents/Resources/
 for bundle in "$BIN_DIR"/*.bundle; do
   if [ -d "$bundle" ]; then
-    cp -R "$bundle" "$RESOURCES_DIR/" 2>/dev/null || true
+    ditto --norsrc "$bundle" "$RESOURCES_DIR/$(basename "$bundle")"
   fi
 done
 
@@ -108,7 +126,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 	<key>CFBundleShortVersionString</key>
 	<string>${VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>300</string>
+	<string>301</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © Alexey Rodionov • Custom Edition by Hung Le Xuan</string>
 	<key>NSAppleEventsUsageDescription</key>
@@ -142,29 +160,36 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 </plist>
 EOF
 
-echo "==> [4/5] Đang ký số (Ad-hoc Codesign)..."
-TMP_SIGN_DIR="/tmp/maccy_sign_$$"
-rm -rf "$TMP_SIGN_DIR"
-mkdir -p "$TMP_SIGN_DIR"
-cp -R "$APP_BUNDLE" "$TMP_SIGN_DIR/$APP_NAME.app"
-chmod -R u+w "$TMP_SIGN_DIR/$APP_NAME.app" 2>/dev/null || true
-xattr -cr "$TMP_SIGN_DIR/$APP_NAME.app" 2>/dev/null || true
-codesign --force --deep --sign - "$TMP_SIGN_DIR/$APP_NAME.app"
-rm -rf "$APP_BUNDLE"
-cp -R "$TMP_SIGN_DIR/$APP_NAME.app" "$APP_BUNDLE"
-rm -rf "$TMP_SIGN_DIR"
+echo "==> [4/5] Đang làm sạch xattr, ký số chuẩn Strict Codesign & đóng gói Zip phát hành..."
+chmod -R u+w "$STAGE_APP" 2>/dev/null || true
+xattr -cr "$STAGE_APP" 2>/dev/null || true
+find "$STAGE_APP" -name '._*' -delete 2>/dev/null || true
 
-echo "==> [5/5] Đang sao chép sang $WORKSPACE_APP_BUNDLE và /Applications/$APP_NAME.app..."
-rm -rf "$WORKSPACE_APP_BUNDLE"
-cp -R "$APP_BUNDLE" "$WORKSPACE_APP_BUNDLE"
+for nested_bundle in "$RESOURCES_DIR"/*.bundle; do
+  if [ -d "$nested_bundle" ]; then
+    codesign --force --sign - "$nested_bundle"
+  fi
+done
+codesign --force --deep --sign - "$STAGE_APP"
+codesign --verify --deep --strict -vvvv "$STAGE_APP"
+
+DIST_ZIP="/tmp/${APP_NAME}-v${VERSION}.zip"
+rm -f "$DIST_ZIP"
+ditto -c -k --norsrc --keepParent "$STAGE_APP" "$DIST_ZIP"
+
+echo "==> [5/5] Đang cài đặt sang /Applications/$APP_NAME.app và $WORKSPACE_APP_BUNDLE..."
+rm -rf "$APP_BUNDLE" "$WORKSPACE_APP_BUNDLE"
+ditto --norsrc "$STAGE_APP" "$APP_BUNDLE"
+ditto --norsrc "$STAGE_APP" "$WORKSPACE_APP_BUNDLE"
 
 if [ -w "/Applications" ]; then
   killall "$APP_NAME" 2>/dev/null || true
   rm -rf "/Applications/$APP_NAME.app"
-  cp -R "$APP_BUNDLE" "/Applications/$APP_NAME.app"
+  ditto --norsrc "$STAGE_APP" "/Applications/$APP_NAME.app"
 fi
 
-echo "==> Hoàn tất đóng gói Maccy.app!"
-echo "    - $APP_BUNDLE"
-echo "    - $WORKSPACE_APP_BUNDLE"
+rm -rf "$STAGE_DIR"
+
+echo "==> Hoàn tất đóng gói Maccy.app ($VERSION)!"
 echo "    - /Applications/$APP_NAME.app"
+echo "    - Gói cài đặt sạch cho máy khác: $DIST_ZIP"

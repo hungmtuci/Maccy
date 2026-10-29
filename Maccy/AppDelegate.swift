@@ -134,7 +134,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-    panel.toggle(height: AppState.shared.popup.height)
+    panel?.toggle(height: AppState.shared.popup.height)
     return true
   }
 
@@ -252,7 +252,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     NotificationCenter.default.addObserver(
       forName: Notification.Name("KeyboardShortcuts_shortcutByNameDidChange"),
       object: nil,
-      queue: nil
+      queue: .main
     ) { notification in
       guard let name = notification.userInfo?["name"] as? KeyboardShortcuts.Name,
             names.contains(name) else { return }

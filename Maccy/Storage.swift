@@ -19,6 +19,9 @@ class Storage {
   private let url = URL.applicationSupportDirectory.appending(path: "Maccy/Storage.sqlite")
 
   init() {
+    let parentDir = url.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+
     var config = ModelConfiguration(url: url)
 
     #if DEBUG
@@ -30,7 +33,26 @@ class Storage {
     do {
       container = try ModelContainer(for: HistoryItem.self, configurations: config)
     } catch let error {
-      fatalError("Cannot load database: \(error.localizedDescription).")
+      // Back up incompatible or corrupted SQLite store on another Mac instead of crashing at launch
+      let stamp = Int(Date.now.timeIntervalSince1970)
+      for suffix in ["", "-wal", "-shm"] {
+        let fileURL = URL(fileURLWithPath: url.path + suffix)
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+          let backupURL = URL(fileURLWithPath: url.path + ".backup-\(stamp)" + suffix)
+          try? FileManager.default.moveItem(at: fileURL, to: backupURL)
+        }
+      }
+
+      if let recovered = try? ModelContainer(for: HistoryItem.self, configurations: config) {
+        container = recovered
+      } else if let inMemory = try? ModelContainer(
+        for: HistoryItem.self,
+        configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+      ) {
+        container = inMemory
+      } else {
+        fatalError("Cannot load database: \(error.localizedDescription).")
+      }
     }
   }
 
