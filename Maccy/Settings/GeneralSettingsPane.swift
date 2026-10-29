@@ -15,10 +15,10 @@ struct GeneralSettingsPane: View {
   @State private var pasteModifier = HistoryItemAction.paste.modifierFlags.description
   @State private var pasteWithoutFormatting = HistoryItemAction.pasteWithoutFormatting.modifierFlags.description
 
-  @State private var updater = SoftwareUpdater()
+  @State private var updater = SoftwareUpdater.shared
 
   var body: some View {
-    Settings.Container(contentWidth: 450) {
+    Settings.Container(contentWidth: 460) {
       Settings.Section(title: "", bottomDivider: true) {
         LaunchAtLogin.Toggle {
           Text("LaunchAtLogin", tableName: "GeneralSettings")
@@ -26,14 +26,30 @@ struct GeneralSettingsPane: View {
         Toggle(isOn: $updater.automaticallyChecksForUpdates) {
           Text("CheckForUpdates", tableName: "GeneralSettings")
         }
-        HStack(spacing: 8) {
-          Button(
-            action: { updater.checkForUpdates() },
-            label: { Text("CheckNow", tableName: "GeneralSettings") }
-          )
-          .disabled(updater.isChecking)
+        HStack(spacing: 10) {
+          Button {
+            updater.checkForUpdates()
+          } label: {
+            if let newTag = updater.availableReleaseTag {
+              Label("Cập nhật ngay (\(newTag))", systemImage: "arrow.down.circle.fill")
+            } else {
+              Text("CheckNow", tableName: "GeneralSettings")
+            }
+          }
+          .disabled(updater.isChecking || updater.isInstallingUpdate)
 
-          Link("GitHub (hungmtuci/Maccy) ↗", destination: SoftwareUpdater.releasesPageURL)
+          if updater.isChecking {
+            ProgressView()
+              .controlSize(.small)
+          }
+
+          Text("v\(updater.currentVersionString)")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+
+          Spacer()
+
+          Link("GitHub Releases ↗", destination: SoftwareUpdater.releasesPageURL)
             .controlSize(.small)
             .foregroundStyle(.secondary)
         }

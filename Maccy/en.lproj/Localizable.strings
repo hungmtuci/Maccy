@@ -7,8 +7,9 @@
 "clear_all" = "Clear all";
 "about" = "About";
 "quit" = "Quit";
-"preferences" = "Preferences…";
-"snippets_studio" = "Snippet Studio…";
+"preferences" = "Settings…";
+"snippets_studio" = "Manage Snippets…";
+"check_for_updates" = "Check for Updates…";
 "clear_alert_message" = "Are you sure you want to clear the history?";
 "clear_alert_comment" = "You can't undo this action.";
 "clear_alert_cancel" = "Cancel";

@@ -106,7 +106,7 @@ struct HistoryItemView: View {
       Button {
         appState.history.select(item, flags: [])
       } label: {
-        Label("Sao chép / Dán", systemImage: "doc.on.doc")
+        Label("Dán / Sao chép", systemImage: "doc.on.doc")
       }
 
       if !item.hasImage {
@@ -115,13 +115,13 @@ struct HistoryItemView: View {
           Clipboard.shared.copy(item.item, removeFormatting: true)
           Clipboard.shared.paste()
         } label: {
-          Label("Dán Plain Text (Không định dạng)", systemImage: "doc.plaintext")
+          Label("Dán văn bản thuần (Plain Text)", systemImage: "doc.plaintext")
         }
       } else if !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         Button {
           copyTransformedText(item.title, pasteImmediately: false)
         } label: {
-          Label("Sao chép chữ trích xuất (OCR)", systemImage: "text.viewfinder")
+          Label("Sao chép chữ trong ảnh (OCR)", systemImage: "text.viewfinder")
         }
       }
 
@@ -129,7 +129,7 @@ struct HistoryItemView: View {
         Button {
           copyTransformedText(url.absoluteString)
         } label: {
-          Label("Sao chép URL thuần", systemImage: "link")
+          Label("Sao chép liên kết thuần", systemImage: "link")
         }
 
         let stripped = Clipboard.stripTrackingParameters(from: url)
@@ -137,32 +137,55 @@ struct HistoryItemView: View {
           Button {
             copyTransformedText(stripped.absoluteString)
           } label: {
-            Label("Sao chép URL sạch (xoá UTM / fbclid)", systemImage: "sparkles")
+            Label("Sao chép liên kết sạch (xoá UTM/fbclid)", systemImage: "sparkles")
           }
         }
       }
 
       Divider()
 
-      if item.hasPlainText || item.hasRichText || item.hasImage {
-        Button {
-          appState.navigator.select(item: item)
-          appState.beginEditing(item)
-        } label: {
-          Label("Đặt tên gợi nhớ / Chỉnh sửa… (⌘E)", systemImage: "pencil.and.list.clipboard")
-        }
+      Button {
+        appState.history.togglePin(item)
+      } label: {
+        Label(
+          item.isPinned ? "Bỏ ghim" : "Ghim cố định",
+          systemImage: item.isPinned ? "pin.slash" : "pin"
+        )
+      }
 
+      Button {
+        if item.isSelected && appState.navigator.selection.count > 1 {
+          appState.toggleSync()
+        } else {
+          CloudSyncManager.shared.toggleSync(for: [item])
+        }
+      } label: {
+        Label(
+          item.isSynced ? "Bỏ đồng bộ Google Drive" : "Đồng bộ lên Google Drive",
+          systemImage: item.isSynced ? "icloud.slash" : "icloud.and.arrow.up"
+        )
+      }
+
+      if item.hasPlainText || item.hasRichText || item.hasImage {
         Button {
           appState.popup.close()
           SnippetManagerWindowController.shared.showAndCreateFromClipboardItem(item.item)
         } label: {
-          Label("Lưu thành Gõ tắt (Snippet)…", systemImage: "bolt.horizontal.circle")
+          Label("Lưu thành Gõ tắt…", systemImage: "bolt.horizontal.circle")
+        }
+
+        Button {
+          appState.navigator.select(item: item)
+          appState.beginEditing(item)
+        } label: {
+          Label("Đặt tên gợi nhớ & Chỉnh sửa…", systemImage: "pencil")
         }
       }
 
       if let sourceText = editableSourceText {
+        Divider()
         Menu {
-          Button("Xóa khoảng trắng & dòng trống thừa") {
+          Button("Xoá khoảng trắng & dòng trống thừa") {
             let cleaned = sourceText
               .components(separatedBy: .newlines)
               .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -181,7 +204,7 @@ struct HistoryItemView: View {
 
           if let json = formattedJSONCandidate {
             Divider()
-            Button("Format JSON đẹp (Pretty Print)") {
+            Button("Định dạng JSON đẹp (Pretty Print)") {
               copyTransformedText(json.pretty)
             }
             Button("Nén gọn JSON (Minify)") {
@@ -191,11 +214,11 @@ struct HistoryItemView: View {
 
           Divider()
 
-          Button("IN HOA TOÀN BỘ") {
+          Button("CHỮ IN HOA") {
             copyTransformedText(sourceText.uppercased(with: Locale(identifier: "vi_VN")))
           }
 
-          Button("chữ thường toàn bộ") {
+          Button("chữ thường") {
             copyTransformedText(sourceText.lowercased(with: Locale(identifier: "vi_VN")))
           }
 
@@ -203,36 +226,12 @@ struct HistoryItemView: View {
             copyTransformedText(sourceText.capitalized(with: Locale(identifier: "vi_VN")))
           }
 
-          Button("Bỏ dấu Tiếng Việt (giữ HOA/thường)") {
+          Button("Bỏ dấu Tiếng Việt") {
             copyTransformedText(sourceText.removingVietnameseDiacriticsPreservingCase)
           }
         } label: {
-          Label("Biến đổi nhanh & Sao chép", systemImage: "wand.and.stars")
+          Label("Biến đổi văn bản", systemImage: "wand.and.stars")
         }
-      }
-
-      Divider()
-
-      Button {
-        if item.isSelected && appState.navigator.selection.count > 1 {
-          appState.toggleSync()
-        } else {
-          CloudSyncManager.shared.toggleSync(for: [item])
-        }
-      } label: {
-        Label(
-          item.isSynced ? "Bỏ đồng bộ Google Drive (⌥S)" : "Đồng bộ lên Google Drive (⌥S)",
-          systemImage: item.isSynced ? "icloud.slash" : "icloud.and.arrow.up"
-        )
-      }
-
-      Button {
-        appState.history.togglePin(item)
-      } label: {
-        Label(
-          item.isPinned ? "Bỏ ghim (⌥P)" : "Ghim (⌥P)",
-          systemImage: item.isPinned ? "pin.slash" : "pin"
-        )
       }
 
       Divider()
@@ -240,7 +239,7 @@ struct HistoryItemView: View {
       Button(role: .destructive) {
         appState.history.delete(item)
       } label: {
-        Label("Xóa (⌥⌫)", systemImage: "trash")
+        Label("Xoá mục này", systemImage: "trash")
       }
     }
     .onAppear {

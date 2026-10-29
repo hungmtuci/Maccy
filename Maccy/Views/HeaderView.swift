@@ -20,31 +20,40 @@ struct HeaderView: View {
 
   var body: some View {
     HStack(alignment: .top, spacing: 0) {
-      HStack(alignment: .center, spacing: 4) {
+      HStack(alignment: .center, spacing: 5) {
         ListHeaderView(
           searchFocused: $searchFocused,
           searchQuery: activeSearchBinding
         )
         .padding(.leading, Popup.horizontalPadding)
 
-        ToolbarButton {
-          appState.togglePopupMode()
-        } label: {
-          HStack(spacing: 3) {
-            Image(systemName: appState.popupMode == .snippets ? "bolt.horizontal.fill" : "bolt.horizontal")
-              .foregroundStyle(appState.popupMode == .snippets ? Color.accentColor : Color.primary)
-            Text("Gõ tắt")
-              .font(.system(size: 10.5, weight: appState.popupMode == .snippets ? .semibold : .regular))
-              .foregroundStyle(appState.popupMode == .snippets ? Color.accentColor : Color.secondary)
+        // Native macOS segmented pill for Clipboard vs Snippets
+        HStack(spacing: 2) {
+          modeSegmentButton(
+            icon: "list.clipboard",
+            isSelected: appState.popupMode == .clipboard,
+            helpText: "Lịch sử Clipboard (⇧⌘V)"
+          ) {
+            if appState.popupMode != .clipboard {
+              appState.togglePopupMode()
+            }
           }
-          .padding(.horizontal, 5)
-          .padding(.vertical, 2)
-          .background(
-            RoundedRectangle(cornerRadius: 4)
-              .fill(appState.popupMode == .snippets ? Color.accentColor.opacity(0.16) : Color.clear)
-          )
+
+          modeSegmentButton(
+            icon: "bolt.horizontal",
+            isSelected: appState.popupMode == .snippets,
+            helpText: "Danh sách Gõ tắt (⇧⌘S / ⌃Tab)"
+          ) {
+            if appState.popupMode != .snippets {
+              appState.togglePopupMode()
+            }
+          }
         }
-        .help("Chuyển đổi giữa Lịch sử Clipboard (⌘⇧V) và Danh sách Gõ tắt (⌘⇧S / ⌃Tab)")
+        .padding(2)
+        .background(
+          RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(Color.primary.opacity(0.07))
+        )
 
         if appState.popupMode == .clipboard {
           ToolbarButton {
@@ -58,18 +67,18 @@ struct HeaderView: View {
               .foregroundStyle(appState.cloudSync.filterOnlySynced ? Color.accentColor : Color.primary)
               if appState.cloudSync.syncedCount > 0 {
                 Text("\(appState.cloudSync.syncedCount)")
-                  .font(.system(size: 10, weight: .semibold))
+                  .font(.system(size: 10, weight: .semibold, design: .rounded))
                   .foregroundStyle(appState.cloudSync.filterOnlySynced ? Color.accentColor : Color.secondary)
               }
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(
-              RoundedRectangle(cornerRadius: 4)
-                .fill(appState.cloudSync.filterOnlySynced ? Color.accentColor.opacity(0.15) : Color.clear)
+              RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(appState.cloudSync.filterOnlySynced ? Color.accentColor.opacity(0.16) : Color.clear)
             )
           }
-          .help("Lọc các mục đồng bộ Google Drive (⌥⌘S). Nhấn ⌥S để đánh dấu đồng bộ mục đang chọn.")
+          .help("Lọc các mục đồng bộ Google Drive (⌥⌘S)")
         }
 
         ToolbarButton {
@@ -98,5 +107,27 @@ struct HeaderView: View {
     .background(.clear)
     .frame(maxHeight: !appState.searchVisible ? 0 : nil, alignment: .top)
     .readHeight(appState, into: \.popup.headerHeight)
+  }
+
+  private func modeSegmentButton(
+    icon: String,
+    isSelected: Bool,
+    helpText: String,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Image(systemName: isSelected ? "\(icon).fill" : icon)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+        .frame(width: 22, height: 19)
+        .background(
+          RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+            .fill(isSelected ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+            .shadow(color: isSelected ? Color.black.opacity(0.12) : .clear, radius: 1, y: 0.5)
+        )
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .help(helpText)
   }
 }

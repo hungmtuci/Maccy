@@ -26,10 +26,11 @@ final class SnippetManagerWindowController {
     let rootView = SnippetStudioView()
     let hosting = NSHostingController(rootView: rootView)
     let win = NSWindow(contentViewController: hosting)
-    win.title = "Trình quản lý Gõ tắt & Biểu mẫu động (Maccy Snippet Studio)"
-    win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-    win.setContentSize(NSSize(width: 980, height: 660))
-    win.minSize = NSSize(width: 780, height: 520)
+    win.title = "Quản lý Gõ tắt"
+    win.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+    win.toolbarStyle = .unified
+    win.setContentSize(NSSize(width: 1020, height: 670))
+    win.minSize = NSSize(width: 820, height: 540)
     win.isReleasedWhenClosed = false
     win.center()
 
@@ -64,23 +65,27 @@ private extension Notification.Name {
   static let snippetStudioImportTypinatorRequested = Notification.Name("MaccySnippetStudioImportTypinatorRequested")
 }
 
-// MARK: - 3-Pane Snippet Studio Window View
+// MARK: - Native macOS SplitView + Unified Toolbar Snippet Studio
 
 struct SnippetStudioView: View {
+  private static let allCollectionsSentinel = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+
   @State private var store = SnippetStore.shared
   @State private var engine = TextExpansionEngine.shared
   @Default(.textExpansionEnabled) private var textExpansionEnabled
   @Default(.ignoreEvents) private var ignoreEvents
+  @Default(.cloudSyncEnabled) private var cloudSyncEnabled
+  @Default(.cloudSyncFolderPath) private var cloudSyncFolderPath
 
   @State private var selectedCollectionId: UUID?
   @State private var selectedItemId: UUID?
   @State private var studioSearchQuery: String = ""
+
+  @State private var showLiveTestPopover: Bool = false
   @State private var liveTestInput: String = ""
 
   @State private var editingCollection: SnippetCollection?
   @State private var isCreatingCollection: Bool = false
-  @State private var newCollectionName: String = ""
-  @State private var newCollectionPrefix: String = ""
 
   @State private var statusBanner: String?
   @State private var isImportingBusy: Bool = false
@@ -98,47 +103,90 @@ struct SnippetStudioView: View {
     return store.item(for: id)
   }
 
+  private var isEngineReady: Bool {
+    textExpansionEnabled && !ignoreEvents && engine.isEventTapActive
+  }
+
+  private var subtitleSummary: String {
+    let statusText: String
+    if !textExpansionEnabled || ignoreEvents {
+      statusText = "Đang tạm dừng"
+    } else if engine.isEventTapActive {
+      statusText = "Đang bắt phím (\(store.activeExpansionCandidates.count) mục kích hoạt)"
+    } else {
+      statusText = "Chưa cấp quyền Bàn phím"
+    }
+    return "\(store.items.count) gõ tắt • \(statusText)"
+  }
+
   var body: some View {
-    VStack(spacing: 0) {
-      studioTopBar
+    NavigationSplitView {
+      collectionsSidebar
+        .navigationSplitViewColumnWidth(min: 210, ideal: 235, max: 295)
+    } detail: {
+      VStack(spacing: 0) {
+        permissionAndDiagnosticsBanner
 
-      permissionAndDiagnosticsBar
-
-      liveTestSandboxBar
-
-      if let banner = statusBanner {
-        HStack(spacing: 8) {
-          Image(systemName: "checkmark.circle.fill")
-            .foregroundStyle(.green)
-          Text(banner)
-            .font(.system(size: 12, weight: .medium))
-          Spacer()
-          Button {
-            statusBanner = nil
-          } label: {
-            Image(systemName: "xmark")
-              .font(.caption)
+        if let banner = statusBanner {
+          HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+              .foregroundStyle(.green)
+            Text(banner)
+              .font(.system(size: 12, weight: .medium))
+            Spacer()
+            Button {
+              statusBanner = nil
+            } label: {
+              Image(systemName: "xmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
           }
-          .buttonStyle(.plain)
+          .padding(.horizontal, 14)
+          .padding(.vertical, 7)
+          .background(Color.accentColor.opacity(0.09))
+          Divider()
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .background(Color.accentColor.opacity(0.1))
-      }
-
-      Divider()
-
-      HSplitView {
-        collectionsSidebar
-          .frame(minWidth: 215, idealWidth: 240, maxWidth: 310)
 
         VSplitView {
-          snippetsTablePane
-            .frame(minHeight: 165, idealHeight: 235)
+          snippetsNativeTablePane
+            .frame(minHeight: 175, idealHeight: 250)
 
-          snippetEditorPane
-            .frame(minHeight: 250)
+          snippetInspectorPane
+            .frame(minHeight: 255)
         }
+      }
+    }
+    .navigationTitle("Quản lý Gõ tắt")
+    .navigationSubtitle(subtitleSummary)
+    .searchable(
+      text: $studioSearchQuery,
+      placement: .toolbar,
+      prompt: "Tìm từ gõ tắt, tên, nội dung…"
+    )
+    .toolbar {
+      ToolbarItemGroup(placement: .primaryAction) {
+        expansionStatusToolbarControl
+
+        Button {
+          createNewSnippet()
+        } label: {
+          Label("Thêm Gõ tắt", systemImage: "plus")
+        }
+        .help("Tạo mục Gõ tắt mới")
+
+        Button {
+          showLiveTestPopover.toggle()
+        } label: {
+          Label("Gõ thử", systemImage: "keyboard")
+        }
+        .help("Mở ô gõ thử nghiệm trực tiếp ngay trong cửa sổ này")
+        .popover(isPresented: $showLiveTestPopover, arrowEdge: .bottom) {
+          liveTestPopoverContent
+        }
+
+        importExportToolbarMenu
       }
     }
     .onAppear {
@@ -166,6 +214,15 @@ struct SnippetStudioView: View {
     .onChange(of: liveTestFieldFocused) { _, focused in
       engine.isStudioTestFieldFocused = focused
     }
+    .onChange(of: showLiveTestPopover) { _, shown in
+      if shown {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+          liveTestFieldFocused = true
+        }
+      } else {
+        engine.isStudioTestFieldFocused = false
+      }
+    }
     .onReceive(NotificationCenter.default.publisher(for: .snippetStudioSelectRequested)) { note in
       if let id = note.object as? UUID, let found = store.item(for: id) {
         selectedCollectionId = found.collectionId
@@ -192,82 +249,44 @@ struct SnippetStudioView: View {
     }
   }
 
-  // MARK: - Top Toolbar
+  // MARK: - Unified macOS Toolbar Items
 
-  private var studioTopBar: some View {
-    let isReady = textExpansionEnabled && !ignoreEvents && engine.isEventTapActive
-    return HStack(spacing: 10) {
+  private var expansionStatusToolbarControl: some View {
+    HStack(spacing: 6) {
       Toggle(isOn: $textExpansionEnabled) {
         HStack(spacing: 5) {
-          Image(systemName: isReady ? "bolt.circle.fill" : (textExpansionEnabled ? "exclamationmark.triangle.fill" : "pause.circle"))
-            .foregroundStyle(isReady ? .green : (textExpansionEnabled ? .orange : .secondary))
-          Text(textExpansionEnabled ? "Gõ tắt tự động: Đang bật" : "Gõ tắt tự động: Tạm dừng")
-            .font(.system(size: 12.5, weight: .semibold))
+          Circle()
+            .fill(isEngineReady ? Color.green : (textExpansionEnabled ? Color.orange : Color.secondary.opacity(0.5)))
+            .frame(width: 7.5, height: 7.5)
+          Text(textExpansionEnabled ? "Tự động" : "Đã tắt")
+            .font(.system(size: 12, weight: .medium))
         }
       }
       .toggleStyle(.switch)
       .controlSize(.small)
+      .help("Bật hoặc tạm dừng tự động bung Gõ tắt trên toàn hệ thống")
 
-      if textExpansionEnabled {
-        if isReady {
-          HStack(spacing: 4) {
-            Circle()
-              .fill(Color.green)
-              .frame(width: 7, height: 7)
-            Text("Đang bắt phím")
-              .font(.system(size: 11, weight: .semibold))
-              .foregroundStyle(.green)
+      if textExpansionEnabled && !isEngineReady {
+        Button {
+          if ignoreEvents {
+            ignoreEvents = false
+          } else {
+            engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
           }
-          .padding(.horizontal, 8)
-          .padding(.vertical, 3)
-          .background(Capsule().fill(Color.green.opacity(0.13)))
-        } else {
-          Button {
-            if ignoreEvents {
-              ignoreEvents = false
-            } else {
-              engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
-            }
-          } label: {
-            HStack(spacing: 4) {
-              Image(systemName: "lock.trianglebadge.exclamationmark.fill")
-                .font(.system(size: 10.5))
-              Text(ignoreEvents ? "Đang tắt sự kiện (Bấm bật lại)" : "Thiếu quyền Bàn phím (Bấm cấp quyền)")
-                .font(.system(size: 11, weight: .semibold))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3.5)
-            .background(Capsule().fill(Color.orange))
-          }
-          .buttonStyle(.plain)
+        } label: {
+          Text("Cấp quyền")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.orange)
         }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
       }
+    }
+  }
 
-      Spacer()
-
-      HStack(spacing: 6) {
-        Image(systemName: "magnifyingglass")
-          .foregroundStyle(.secondary)
-        TextField("Tìm tên, từ gõ tắt, nội dung (hỗ trợ Tiếng Việt không dấu)…", text: $studioSearchQuery)
-          .textFieldStyle(.plain)
-          .frame(minWidth: 240, maxWidth: 320)
-        if !studioSearchQuery.isEmpty {
-          Button {
-            studioSearchQuery = ""
-          } label: {
-            Image(systemName: "xmark.circle.fill")
-              .foregroundStyle(.secondary)
-          }
-          .buttonStyle(.plain)
-        }
-      }
-      .padding(.horizontal, 8)
-      .padding(.vertical, 5)
-      .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-      .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25), lineWidth: 1))
-
-      Menu {
+  private var importExportToolbarMenu: some View {
+    Menu {
+      Section("Nhập dữ liệu") {
         Button {
           runTypinatorImport()
         } label: {
@@ -283,21 +302,32 @@ struct SnippetStudioView: View {
         Button {
           runFileImportDialog()
         } label: {
-          Label("Nhập từ tệp (.alfredsnippets, .json, .csv, .tsv)…", systemImage: "square.and.arrow.down")
+          Label("Nhập từ tệp (.alfredsnippets, .json, .csv)…", systemImage: "square.and.arrow.down")
         }
 
-        Divider()
-
-        Menu("Cài đặt Gói mẫu có sẵn") {
+        Menu {
           ForEach(SnippetStarterPackID.allCases) { pack in
             Button(pack.title) {
               let summary = store.importPayload(SnippetImporter.starterPackPayload(for: pack))
               statusBanner = "Đã cài gói \"\(summary.sourceDescription)\" (+\(summary.snippetsImported) mục mới)."
             }
           }
+        } label: {
+          Label("Cài đặt Gói mẫu có sẵn", systemImage: "shippingbox")
         }
+      }
 
-        Divider()
+      Section("Sao lưu & Đồng bộ") {
+        if cloudSyncEnabled && !cloudSyncFolderPath.isEmpty {
+          Button {
+            Task { @MainActor in
+              await store.syncWithGoogleDrive()
+              statusBanner = store.lastSnippetSyncMessage
+            }
+          } label: {
+            Label("Đồng bộ Google Drive ngay", systemImage: "arrow.triangle.2.circlepath.icloud")
+          }
+        }
 
         Button {
           runExportJSONDialog()
@@ -308,152 +338,180 @@ struct SnippetStudioView: View {
         Button {
           runExportCSVDialog()
         } label: {
-          Label("Xuất toàn bộ ra tệp CSV (Excel)…", systemImage: "tablecells")
+          Label("Xuất bảng ra tệp CSV (Excel)…", systemImage: "tablecells")
         }
-      } label: {
-        Label(isImportingBusy ? "Đang nhập…" : "Nhập / Xuất", systemImage: "arrow.up.arrow.down.circle")
       }
-      .disabled(isImportingBusy)
+    } label: {
+      Label(isImportingBusy ? "Đang nhập…" : "Nhập / Xuất", systemImage: "ellipsis.circle")
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 9)
-    .background(Color(nsColor: .windowBackgroundColor))
+    .disabled(isImportingBusy)
+    .help("Nhập từ Typinator, Alfred, tệp tin hoặc xuất sao lưu")
   }
 
-  @ViewBuilder
-  private var permissionAndDiagnosticsBar: some View {
-    if textExpansionEnabled && ignoreEvents {
-      HStack(spacing: 10) {
-        Image(systemName: "pause.circle.fill")
-          .foregroundStyle(.orange)
-        Text("Maccy đang bật chế độ Tạm dừng bắt sự kiện toàn cục (Ignore Events), nên Gõ tắt tự động tạm nghỉ.")
-          .font(.system(size: 12, weight: .medium))
+  private var liveTestPopoverContent: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack {
+        Image(systemName: "keyboard.fill")
+          .foregroundStyle(Color.accentColor)
+        Text("Ô gõ thử nghiệm trực tiếp")
+          .font(.system(size: 13, weight: .semibold))
         Spacer()
-        Button("Bật lại ngay") {
-          ignoreEvents = false
+        if !liveTestInput.isEmpty {
+          Button("Xoá") {
+            liveTestInput = ""
+            engine.resetBuffer()
+          }
+          .controlSize(.small)
+          .buttonStyle(.link)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.small)
       }
-      .padding(.horizontal, 14)
-      .padding(.vertical, 8)
-      .background(Color.orange.opacity(0.14))
-    } else if textExpansionEnabled && !engine.isEventTapActive {
-      HStack(alignment: .center, spacing: 10) {
-        Image(systemName: "exclamationmark.triangle.fill")
-          .font(.system(size: 16))
-          .foregroundStyle(.orange)
 
-        VStack(alignment: .leading, spacing: 2) {
-          Text("Chưa kích hoạt được quyền Bàn phím (Accessibility) — Gõ tắt tự động đang bị macOS chặn!")
-            .font(.system(size: 12.5, weight: .bold))
-          Text("Mỗi khi chép đè bản Maccy mới vào /Applications, quyền cũ trong System Settings bị hết hạn chữ ký (dù nút công tắc vẫn hiện bật). Bấm nút bên phải để làm mới 1-chạm rồi bật lại công tắc Maccy.")
-            .font(.system(size: 11.5))
-            .foregroundStyle(.secondary)
-        }
-
-        Spacer(minLength: 8)
-
-        Button {
-          engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
-        } label: {
-          Label("Làm mới & Cấp quyền Bàn phím", systemImage: "bolt.shield.fill")
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(.orange)
-        .controlSize(.small)
-
-        Button("Mở Cài đặt") {
-          engine.openAccessibilitySettingsPane()
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-      }
-      .padding(.horizontal, 14)
-      .padding(.vertical, 9)
-      .background(Color.orange.opacity(0.15))
-    } else if textExpansionEnabled && engine.isSecureInputLocked {
-      HStack(spacing: 8) {
-        Image(systemName: "lock.fill")
-          .foregroundStyle(.yellow)
-        Text("Một ứng dụng đang bật Secure Keyboard Input (ô mật khẩu / Terminal / 1Password), có thể tạm chặn gõ tắt trong cửa sổ bảo mật đó.")
-          .font(.system(size: 11.5))
-          .foregroundStyle(.secondary)
-        Spacer()
-      }
-      .padding(.horizontal, 14)
-      .padding(.vertical, 5)
-      .background(Color.yellow.opacity(0.10))
-    }
-  }
-
-  private var liveTestSandboxBar: some View {
-    HStack(spacing: 8) {
-      Image(systemName: "keyboard")
-        .foregroundStyle(Color.accentColor)
-      Text("Ô gõ thử trực tiếp:")
-        .font(.system(size: 11.5, weight: .semibold))
-        .foregroundStyle(.secondary)
-
-      TextField("Bấm vào đây rồi gõ thử từ gõ tắt (VD: 009) để kiểm tra ngay…", text: $liveTestInput)
+      TextField("Gõ thử từ gõ tắt (VD: 009, \\bcc…) ngay tại đây", text: $liveTestInput)
         .textFieldStyle(.roundedBorder)
-        .font(.system(size: 12.5))
+        .font(.system(size: 13))
         .focused($liveTestFieldFocused)
-        .frame(maxWidth: 420)
+        .frame(width: 340)
 
-      if !liveTestInput.isEmpty {
-        Button("Xoá ô thử") {
-          liveTestInput = ""
-          engine.resetBuffer()
+      if !isEngineReady {
+        HStack(spacing: 6) {
+          Image(systemName: "exclamationmark.triangle.fill")
+            .foregroundStyle(.orange)
+          Text("Cần bật quyền Bàn phím trước khi gõ thử.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Spacer()
+          Button("Cấp quyền") {
+            showLiveTestPopover = false
+            engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
+          }
+          .controlSize(.mini)
+          .buttonStyle(.borderedProminent)
+          .tint(.orange)
         }
-        .controlSize(.mini)
-        .buttonStyle(.borderless)
-      }
-
-      Spacer()
-
-      if !engine.lastExpandedSummary.isEmpty {
-        HStack(spacing: 4) {
-          Image(systemName: "checkmark.seal.fill")
+      } else if !engine.lastExpandedSummary.isEmpty {
+        HStack(spacing: 5) {
+          Image(systemName: "checkmark.circle.fill")
             .foregroundStyle(.green)
-            .font(.system(size: 11))
-          Text("Vừa bung: \(engine.lastExpandedSummary)")
-            .font(.system(size: 11))
+            .font(.caption)
+          Text("Gần nhất: \(engine.lastExpandedSummary)")
+            .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
         }
+      } else {
+        Text("Mẹo: Với mục chọn chế độ \"Sau khoảng trắng\", hãy gõ thêm dấu cách sau từ gõ tắt.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
       }
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 6)
-    .background(Color(nsColor: .controlBackgroundColor).opacity(0.65))
+    .padding(14)
   }
 
-  // MARK: - Left Sidebar (Collections / Sets)
+  // MARK: - Conditional Permission & Diagnostic Callout
+
+  @ViewBuilder
+  private var permissionAndDiagnosticsBanner: some View {
+    if textExpansionEnabled && ignoreEvents {
+      VStack(spacing: 0) {
+        HStack(spacing: 10) {
+          Image(systemName: "pause.circle.fill")
+            .foregroundStyle(.orange)
+          Text("Maccy đang bật chế độ Tạm dừng ghi sự kiện toàn cục (Ignore Events).")
+            .font(.system(size: 12, weight: .medium))
+          Spacer()
+          Button("Tiếp tục hoạt động") {
+            ignoreEvents = false
+          }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12))
+        Divider()
+      }
+    } else if textExpansionEnabled && !engine.isEventTapActive {
+      VStack(spacing: 0) {
+        HStack(alignment: .center, spacing: 12) {
+          Image(systemName: "hand.raised.circle.fill")
+            .font(.system(size: 20))
+            .foregroundStyle(.orange)
+
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Cần cấp quyền Trợ năng (Accessibility) để tự động bung Gõ tắt")
+              .font(.system(size: 12.5, weight: .semibold))
+            Text("Khi cập nhật phiên bản mới, chữ ký cũ trong System Settings không còn hiệu lực. Bấm nút bên phải để làm mới rồi bật công tắc Maccy.")
+              .font(.system(size: 11.5))
+              .foregroundStyle(.secondary)
+          }
+
+          Spacer(minLength: 8)
+
+          Button {
+            engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
+          } label: {
+            Label("Làm mới & Cấp quyền", systemImage: "bolt.shield.fill")
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(.orange)
+          .controlSize(.small)
+
+          Button("Mở Cài đặt") {
+            engine.openAccessibilitySettingsPane()
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.12))
+        Divider()
+      }
+    } else if textExpansionEnabled && engine.isSecureInputLocked {
+      VStack(spacing: 0) {
+        HStack(spacing: 8) {
+          Image(systemName: "lock.shield")
+            .foregroundStyle(.secondary)
+          Text("macOS đang bật Secure Keyboard Input (do ô mật khẩu / Terminal / 1Password), gõ tắt sẽ tự tạm ẩn trong ô bảo mật đó.")
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
+          Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Color.secondary.opacity(0.07))
+        Divider()
+      }
+    }
+  }
+
+  // MARK: - Left Sidebar (Native macOS Translucent Sidebar)
 
   private var collectionsSidebar: some View {
     VStack(spacing: 0) {
       List(selection: Binding(
-        get: { selectedCollectionId ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")! },
+        get: { selectedCollectionId ?? Self.allCollectionsSentinel },
         set: { newVal in
-          let allSentinel = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
-          selectedCollectionId = (newVal == allSentinel) ? nil : newVal
+          selectedCollectionId = (newVal == Self.allCollectionsSentinel) ? nil : newVal
           selectedItemId = store.items(in: selectedCollectionId, searchQuery: studioSearchQuery).first?.id
         }
       )) {
-        HStack {
-          Image(systemName: "tray.full.fill")
-            .foregroundStyle(Color.accentColor)
-          Text("Tất cả Gõ tắt")
-            .fontWeight(.medium)
-          Spacer()
-          Text("\(store.items.count)")
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
+        Section {
+          HStack(spacing: 8) {
+            Image(systemName: "tray.full")
+              .foregroundStyle(Color.accentColor)
+              .frame(width: 16)
+            Text("Tất cả Gõ tắt")
+              .fontWeight(.medium)
+            Spacer()
+            Text("\(store.items.count)")
+              .font(.caption.monospacedDigit())
+              .foregroundStyle(.secondary)
+          }
+          .tag(Self.allCollectionsSentinel)
         }
-        .tag(UUID(uuidString: "00000000-0000-0000-0000-000000000000")!)
 
-        Section("Bộ Gõ tắt (Kéo để đổi ưu tiên)") {
+        Section("Bộ Gõ tắt") {
           ForEach(store.collections) { col in
             HStack(spacing: 6) {
               Toggle(
@@ -465,10 +523,12 @@ struct SnippetStudioView: View {
               )
               .labelsHidden()
               .toggleStyle(.checkbox)
+              .controlSize(.small)
 
               Image(systemName: col.icon)
                 .font(.system(size: 12))
                 .foregroundStyle(col.isEnabled ? Color.accentColor : Color.secondary)
+                .frame(width: 15)
 
               Text(col.name)
                 .lineLimit(1)
@@ -476,10 +536,11 @@ struct SnippetStudioView: View {
 
               if !col.keywordPrefix.isEmpty {
                 Text(col.keywordPrefix)
-                  .font(.system(size: 9.5, design: .monospaced))
+                  .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                  .foregroundStyle(.secondary)
                   .padding(.horizontal, 4)
                   .padding(.vertical, 1)
-                  .background(RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.16)))
+                  .background(RoundedRectangle(cornerRadius: 3.5).fill(Color.primary.opacity(0.08)))
               }
 
               Spacer(minLength: 2)
@@ -490,13 +551,11 @@ struct SnippetStudioView: View {
             }
             .tag(col.id)
             .contextMenu {
-              Button("Tạo Gõ tắt mới trong bộ này") {
+              Button("Thêm Gõ tắt vào Bộ này") {
                 selectedCollectionId = col.id
-                let created = store.createItem(in: col.id, name: "Gõ tắt mới")
-                selectedItemId = created.id
-                abbreviationFieldFocused = true
+                createNewSnippet(in: col.id)
               }
-              Button("Chỉnh sửa tên & tiền tố Bộ…") {
+              Button("Đổi tên & Tiền tố Bộ…") {
                 editingCollection = col
               }
               Divider()
@@ -517,202 +576,168 @@ struct SnippetStudioView: View {
 
       Divider()
 
-      HStack(spacing: 8) {
+      HStack(spacing: 12) {
         Button {
           isCreatingCollection = true
         } label: {
-          Image(systemName: "plus")
+          Label("Bộ mới", systemImage: "folder.badge.plus")
+            .font(.system(size: 11.5))
         }
-        .buttonStyle(.borderless)
-        .help("Thêm Bộ Gõ tắt mới")
-
-        Button {
-          if let colId = selectedCollectionId {
-            selectedCollectionId = nil
-            store.deleteCollection(colId)
-          }
-        } label: {
-          Image(systemName: "minus")
-        }
-        .buttonStyle(.borderless)
-        .disabled(selectedCollectionId == nil)
-        .help("Xoá Bộ đang chọn")
-
-        Button {
-          if let colId = selectedCollectionId, let col = store.collection(for: colId) {
-            editingCollection = col
-          }
-        } label: {
-          Image(systemName: "info.circle")
-        }
-        .buttonStyle(.borderless)
-        .disabled(selectedCollectionId == nil)
-        .help("Thiết lập Tiền tố (Prefix) / Hậu tố cho Bộ")
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Tạo Bộ Gõ tắt mới")
 
         Spacer()
-        Text("\(store.activeExpansionCandidates.count) đang bật")
-          .font(.caption2)
+
+        if let colId = selectedCollectionId, let col = store.collection(for: colId) {
+          Button {
+            editingCollection = col
+          } label: {
+            Image(systemName: "slider.horizontal.3")
+              .font(.system(size: 11.5))
+          }
+          .buttonStyle(.plain)
           .foregroundStyle(.secondary)
+          .help("Chỉnh sửa tên & tiền tố Bộ đang chọn")
+
+          Button {
+            selectedCollectionId = nil
+            store.deleteCollection(colId)
+          } label: {
+            Image(systemName: "trash")
+              .font(.system(size: 11.5))
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(.secondary)
+          .help("Xoá Bộ đang chọn")
+        }
       }
-      .padding(.horizontal, 10)
-      .padding(.vertical, 6)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
     }
   }
 
-  // MARK: - Top-Right Snippets Table
+  // MARK: - Top-Right Native macOS NSTableView (`SwiftUI.Table`)
 
-  private var snippetsTablePane: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 8) {
-        Text("Từ gõ tắt")
-          .frame(width: 115, alignment: .leading)
-        Text("Tên gợi nhớ")
-          .frame(width: 185, alignment: .leading)
-        Text("Nội dung mở rộng")
-          .frame(maxWidth: .infinity, alignment: .leading)
-        Text("Chế độ")
-          .frame(width: 68, alignment: .trailing)
-      }
-      .font(.caption.weight(.semibold))
-      .foregroundStyle(.secondary)
-      .padding(.horizontal, 12)
-      .padding(.vertical, 5)
-      .background(Color(nsColor: .controlBackgroundColor))
-
-      Divider()
-
-      List(visibleItems, selection: $selectedItemId) { snippet in
+  private var snippetsNativeTablePane: some View {
+    Table(visibleItems, selection: $selectedItemId) {
+      TableColumn("Từ gõ tắt") { snippet in
         let col = store.collection(for: snippet.collectionId)
         let effAbbr = snippet.effectiveAbbreviation(in: col)
+        if effAbbr.isEmpty {
+          Text("—")
+            .foregroundStyle(.tertiary)
+        } else {
+          Text(effAbbr)
+            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+            .foregroundStyle(snippet.isEnabled ? Color.accentColor : Color.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(
+              RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.accentColor.opacity(snippet.isEnabled ? 0.12 : 0.05))
+            )
+            .lineLimit(1)
+        }
+      }
+      .width(min: 85, ideal: 115, max: 185)
+
+      TableColumn("Tên gợi nhớ") { snippet in
+        Text(snippet.displayTitle)
+          .font(.system(size: 12.5, weight: .medium))
+          .foregroundStyle(snippet.isEnabled ? Color.primary : Color.secondary)
+          .lineLimit(1)
+      }
+      .width(min: 140, ideal: 205, max: 320)
+
+      TableColumn("Nội dung mở rộng") { snippet in
         let previewLine = snippet.content
           .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
           .trimmingCharacters(in: .whitespacesAndNewlines)
-          .shortened(to: 120)
+          .shortened(to: 140)
+        Text(previewLine.isEmpty ? "(Trống)" : previewLine)
+          .font(.system(size: 12))
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
 
-        HStack(spacing: 8) {
-          Text(effAbbr.isEmpty ? "—" : effAbbr)
-            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-            .foregroundStyle(effAbbr.isEmpty ? Color.secondary : Color.accentColor)
-            .lineLimit(1)
-            .frame(width: 115, alignment: .leading)
-
-          Text(snippet.displayTitle)
-            .font(.system(size: 12.5, weight: .medium))
-            .lineLimit(1)
-            .frame(width: 185, alignment: .leading)
-
-          Text(previewLine)
-            .font(.system(size: 12))
+      TableColumn("Chế độ") { snippet in
+        HStack(spacing: 4) {
+          Image(systemName: snippet.triggerMode.badgeSymbol)
+            .font(.system(size: 10))
+            .foregroundStyle(snippet.triggerMode == .immediate ? Color.accentColor : Color.secondary)
+          Text(shortTriggerLabel(for: snippet.triggerMode))
+            .font(.system(size: 11))
             .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-          HStack(spacing: 4) {
-            Text(snippet.caseMode.shortSymbol)
-              .font(.system(size: 10, weight: .medium, design: .monospaced))
-              .foregroundStyle(.secondary)
-            Image(systemName: snippet.triggerMode.badgeSymbol)
-              .font(.system(size: 10.5))
-              .foregroundStyle(snippet.triggerMode == .immediate ? Color.blue : Color.secondary)
-          }
-          .frame(width: 68, alignment: .trailing)
-        }
-        .opacity(snippet.isEnabled ? 1.0 : 0.45)
-        .tag(snippet.id)
-        .contextMenu {
-          Button("Nhân bản Gõ tắt") {
-            if let dup = store.duplicateItem(snippet.id) {
-              selectedItemId = dup.id
-            }
-          }
-          Button(snippet.isEnabled ? "Tạm tắt Gõ tắt này" : "Bật lại Gõ tắt này") {
-            var copy = snippet
-            copy.isEnabled.toggle()
-            store.updateItem(copy)
-          }
-          Divider()
-          Button("Xoá Gõ tắt", role: .destructive) {
-            if selectedItemId == snippet.id {
-              selectedItemId = nil
-            }
-            store.deleteItem(snippet.id)
-          }
         }
       }
-      .listStyle(.inset(alternatesRowBackgrounds: true))
-
-      Divider()
-
-      HStack(spacing: 10) {
+      .width(min: 85, ideal: 100, max: 125)
+    }
+    .tableStyle(.inset(alternatesRowBackgrounds: true))
+    .contextMenu(forSelectionType: SnippetItem.ID.self) { ids in
+      if let targetId = ids.first, let snippet = store.item(for: targetId) {
         Button {
-          let created = store.createItem(
-            in: selectedCollectionId ?? store.collections.first?.id,
-            name: "",
-            abbreviation: "",
-            content: ""
-          )
-          selectedItemId = created.id
-          abbreviationFieldFocused = true
-        } label: {
-          Label("Thêm Gõ tắt", systemImage: "plus")
-        }
-        .controlSize(.small)
-
-        Button {
-          if let id = selectedItemId, let dup = store.duplicateItem(id) {
+          if let dup = store.duplicateItem(snippet.id) {
             selectedItemId = dup.id
           }
         } label: {
-          Image(systemName: "plus.square.on.square")
+          Label("Nhân bản Gõ tắt", systemImage: "plus.square.on.square")
         }
-        .controlSize(.small)
-        .disabled(selectedItemId == nil)
-        .help("Nhân bản mục đang chọn")
 
         Button {
-          if let id = selectedItemId {
-            let list = visibleItems
-            let currentIdx = list.firstIndex(where: { $0.id == id }) ?? 0
-            store.deleteItem(id)
-            let updatedList = visibleItems
-            if updatedList.indices.contains(currentIdx) {
-              selectedItemId = updatedList[currentIdx].id
-            } else {
-              selectedItemId = updatedList.last?.id
-            }
-          }
+          var copy = snippet
+          copy.isEnabled.toggle()
+          store.updateItem(copy)
         } label: {
-          Image(systemName: "trash")
+          Label(
+            snippet.isEnabled ? "Tạm tắt mục này" : "Bật lại mục này",
+            systemImage: snippet.isEnabled ? "pause.circle" : "play.circle"
+          )
         }
-        .controlSize(.small)
-        .disabled(selectedItemId == nil)
-        .help("Xoá mục đang chọn")
 
-        Spacer()
+        Divider()
 
-        Text("\(visibleItems.count) mục hiển thị")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        Button(role: .destructive) {
+          deleteSnippetAndAdvanceSelection(snippet.id)
+        } label: {
+          Label("Xoá Gõ tắt", systemImage: "trash")
+        }
       }
-      .padding(.horizontal, 12)
-      .padding(.vertical, 6)
     }
   }
 
-  // MARK: - Bottom-Right Full Snippet Editor
+  private func shortTriggerLabel(for mode: SnippetTriggerMode) -> String {
+    switch mode {
+    case .immediate: return "Tức thì"
+    case .afterDelimiter: return "Sau dấu cách"
+    case .manualOnly: return "Thủ công"
+    }
+  }
+
+  // MARK: - Bottom-Right Native macOS Inspector & Content Editor
 
   @ViewBuilder
-  private var snippetEditorPane: some View {
+  private var snippetInspectorPane: some View {
     if let selected = currentSelectedItem {
-      VStack(alignment: .leading, spacing: 8) {
-        // Row 1: Abbreviation + Name + Collection + Enabled toggle
-        HStack(spacing: 10) {
-          VStack(alignment: .leading, spacing: 3) {
-            Text("Từ gõ tắt (Abbreviation)")
-              .font(.caption.weight(.semibold))
-              .foregroundStyle(.secondary)
+      let parentCol = store.collection(for: selected.collectionId)
+      let effectiveAbbr = selected.effectiveAbbreviation(in: parentCol)
+
+      VStack(alignment: .leading, spacing: 10) {
+        // Row 1: Primary Identity Fields + Item Actions
+        HStack(alignment: .bottom, spacing: 10) {
+          VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+              Text("Từ gõ tắt")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+              if effectiveAbbr != selected.abbreviation && !effectiveAbbr.isEmpty {
+                Text("(\(effectiveAbbr))")
+                  .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                  .foregroundStyle(Color.accentColor)
+              }
+            }
             TextField(
-              "VD: \\bcc, ;reply (để trống nếu chỉ dùng ⌘⇧S)",
+              "VD: 009, \\bcc, ;reply",
               text: Binding(
                 get: { selected.abbreviation },
                 set: { val in
@@ -728,15 +753,15 @@ struct SnippetStudioView: View {
             .font(.system(size: 13, weight: .semibold, design: .monospaced))
             .textFieldStyle(.roundedBorder)
             .focused($abbreviationFieldFocused)
-            .frame(minWidth: 180, maxWidth: 230)
+            .frame(minWidth: 165, maxWidth: 215)
           }
 
-          VStack(alignment: .leading, spacing: 3) {
-            Text("Tên gợi nhớ (hiển thị khi tìm ⌘⇧S)")
+          VStack(alignment: .leading, spacing: 4) {
+            Text("Tên gợi nhớ")
               .font(.caption.weight(.semibold))
               .foregroundStyle(.secondary)
             TextField(
-              "VD: Bộ công cụ thu thập dữ liệu, Mẫu Email phản hồi…",
+              "Mô tả ngắn gọn (dùng khi tìm nhanh ⇧⌘S)…",
               text: Binding(
                 get: { selected.name },
                 set: { val in
@@ -749,8 +774,8 @@ struct SnippetStudioView: View {
             .textFieldStyle(.roundedBorder)
           }
 
-          VStack(alignment: .leading, spacing: 3) {
-            Text("Thuộc Bộ")
+          VStack(alignment: .leading, spacing: 4) {
+            Text("Bộ Gõ tắt")
               .font(.caption.weight(.semibold))
               .foregroundStyle(.secondary)
             Picker(
@@ -769,27 +794,53 @@ struct SnippetStudioView: View {
               }
             }
             .labelsHidden()
-            .frame(width: 170)
+            .frame(width: 165)
           }
 
-          Toggle(
-            "Bật",
-            isOn: Binding(
-              get: { selected.isEnabled },
-              set: { val in
-                var copy = selected
-                copy.isEnabled = val
-                store.updateItem(copy)
-              }
+          HStack(spacing: 8) {
+            Toggle(
+              "Đang bật",
+              isOn: Binding(
+                get: { selected.isEnabled },
+                set: { val in
+                  var copy = selected
+                  copy.isEnabled = val
+                  store.updateItem(copy)
+                }
+              )
             )
-          )
-          .padding(.top, 14)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            Divider()
+              .frame(height: 18)
+
+            Button {
+              if let dup = store.duplicateItem(selected.id) {
+                selectedItemId = dup.id
+              }
+            } label: {
+              Image(systemName: "plus.square.on.square")
+            }
+            .buttonStyle(.borderless)
+            .help("Nhân bản Gõ tắt này")
+
+            Button(role: .destructive) {
+              deleteSnippetAndAdvanceSelection(selected.id)
+            } label: {
+              Image(systemName: "trash")
+                .foregroundStyle(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Xoá Gõ tắt này")
+          }
+          .padding(.bottom, 3)
         }
 
-        // Row 2: Content Mode, Trigger Mode, Case Handling, Whole Word
+        // Row 2: Grouped macOS Behavior & Macro Strip
         HStack(spacing: 10) {
           Picker(
-            "Định dạng:",
+            "Loại:",
             selection: Binding(
               get: { selected.contentMode },
               set: { mode in
@@ -804,10 +855,10 @@ struct SnippetStudioView: View {
             }
           }
           .controlSize(.small)
-          .frame(maxWidth: 245)
+          .frame(maxWidth: 215)
 
           Picker(
-            "Kích hoạt:",
+            "Mở rộng:",
             selection: Binding(
               get: { selected.triggerMode },
               set: { trig in
@@ -822,7 +873,7 @@ struct SnippetStudioView: View {
             }
           }
           .controlSize(.small)
-          .frame(maxWidth: 255)
+          .frame(maxWidth: 235)
 
           Picker(
             "",
@@ -841,7 +892,7 @@ struct SnippetStudioView: View {
           }
           .labelsHidden()
           .controlSize(.small)
-          .frame(maxWidth: 215)
+          .frame(maxWidth: 195)
 
           Toggle(
             "Nguyên từ",
@@ -855,13 +906,27 @@ struct SnippetStudioView: View {
             )
           )
           .controlSize(.small)
-          .help("Chỉ bung gõ tắt khi đứng độc lập (không dính liền sau chữ cái khác)")
+          .help("Chỉ bung khi từ gõ tắt đứng độc lập (không dính liền sau chữ cái/số khác)")
+
+          Spacer(minLength: 4)
+
+          insertMacroMenu(for: selected)
+
+          Toggle(isOn: $showLivePreviewBox) {
+            Image(systemName: "eye")
+          }
+          .toggleStyle(.button)
+          .controlSize(.small)
+          .help("Ẩn/hiện khung xem trước kết quả mở rộng")
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+          RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(Color.primary.opacity(0.04))
+        )
 
-        // Row 3: Macro Insertion Toolbar `{...}`
-        macroToolbar(for: selected)
-
-        // Row 4: Body Editor (Text / Script / Image)
+        // Row 3: Main Body Editor
         if selected.contentMode == .image {
           imageEditorBody(for: selected)
         } else {
@@ -880,9 +945,16 @@ struct SnippetStudioView: View {
               ? .system(size: 13.5)
               : .system(size: 12.5, design: .monospaced)
           )
-          .padding(6)
-          .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-          .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25), lineWidth: 1))
+          .scrollContentBackground(.hidden)
+          .padding(8)
+          .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+              .fill(Color(nsColor: .textBackgroundColor))
+          )
+          .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+              .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+          )
         }
 
         if showLivePreviewBox {
@@ -892,122 +964,124 @@ struct SnippetStudioView: View {
             optionalToggles: [:],
             clipboardString: NSPasteboard.general.string(forType: .string) ?? ""
           )
-          VStack(alignment: .leading, spacing: 3) {
-            Text("Xem trước kết quả mở rộng (▏ là vị trí con trỏ sau khi chèn):")
-              .font(.caption2.weight(.semibold))
-              .foregroundStyle(.secondary)
-            Text(previewStr)
+          HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "sparkles")
+              .foregroundStyle(Color.accentColor)
+              .font(.caption)
+              .padding(.top, 2)
+            Text(previewStr.isEmpty ? "(Trống)" : previewStr)
               .font(.system(size: 12))
-              .lineLimit(4)
+              .lineLimit(3)
               .frame(maxWidth: .infinity, alignment: .leading)
-              .padding(6)
-              .background(RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.08)))
           }
+          .padding(8)
+          .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+              .fill(Color.accentColor.opacity(0.08))
+          )
         }
       }
-      .padding(12)
+      .padding(14)
+      .background(Color(nsColor: .windowBackgroundColor))
     } else {
-      VStack(spacing: 8) {
-        Image(systemName: "square.and.pencil")
-          .font(.system(size: 28))
-          .foregroundStyle(.secondary)
-        Text("Chọn một Gõ tắt ở bảng trên hoặc bấm \"Thêm Gõ tắt\" để bắt đầu")
-          .foregroundStyle(.secondary)
+      ContentUnavailableView {
+        Label("Chưa chọn Gõ tắt", systemImage: "bolt.horizontal.circle")
+      } description: {
+        Text("Chọn một mục ở bảng phía trên hoặc nhấn nút + trên thanh công cụ để tạo Gõ tắt mới.")
+      } actions: {
+        Button("Tạo Gõ tắt mới") {
+          createNewSnippet()
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
   }
 
-  private func macroToolbar(for selected: SnippetItem) -> some View {
-    HStack(spacing: 6) {
-      Menu("{...} Biểu mẫu Fill-in") {
-        Button("Ô nhập 1 dòng — {{input:Tên=Mặc định}}") {
+  private func insertMacroMenu(for selected: SnippetItem) -> some View {
+    Menu {
+      Menu("Biểu mẫu nhập liệu (Fill-in)") {
+        Button("Ô nhập 1 dòng — {{input:Tên=}}") {
           appendToken("{{input:Tên người nhận=}}", to: selected)
         }
         Button("Ô nhập nhiều dòng — {{textarea:Ghi chú}}") {
           appendToken("{{textarea:Nội dung chi tiết=}}", to: selected)
         }
-        Button("Menu chọn (Dropdown) — {{select:Nhãn|*Mục 1|Mục 2}}") {
+        Button("Danh sách chọn — {{select:Nhãn|*Mục 1|Mục 2}}") {
           appendToken("{{select:Danh xưng|*Anh|Chị|Thầy|Cô}}", to: selected)
         }
-        Button("Đoạn văn tuỳ chọn bật/tắt — {{optional:...}}") {
+        Button("Đoạn văn tuỳ chọn — {{optional:...}}") {
           appendToken("{{optional:Đính kèm tài liệu=1}}Đính kèm tài liệu chi tiết.{{/optional}}", to: selected)
         }
       }
-      .controlSize(.small)
 
-      Menu("📅 Ngày & Giờ động") {
-        Button("Ngày hôm nay (dd/MM/yyyy) — {{date:dd/MM/yyyy}}") {
+      Menu("Ngày & Giờ tự động") {
+        Button("Ngày hôm nay (dd/MM/yyyy)") {
           appendToken("{{date:dd/MM/yyyy}}", to: selected)
         }
-        Button("Ngày chuẩn ISO (yyyy-MM-dd) — {{isodate}}") {
+        Button("Ngày chuẩn ISO (yyyy-MM-dd)") {
           appendToken("{{isodate}}", to: selected)
         }
-        Button("Ngày & Giờ hiện tại — {{datetime}}") {
+        Button("Ngày & Giờ hiện tại") {
           appendToken("{{datetime}}", to: selected)
         }
         Divider()
-        Button("+3 Ngày làm việc (bỏ T7, CN) — {{date +3bd:dd/MM/yyyy}}") {
+        Button("+3 Ngày làm việc (bỏ T7, CN)") {
           appendToken("{{date +3bd:dd/MM/yyyy}}", to: selected)
         }
-        Button("+5 Ngày làm việc (bỏ T7, CN) — {{date +5bd:dd/MM/yyyy}}") {
+        Button("+5 Ngày làm việc (bỏ T7, CN)") {
           appendToken("{{date +5bd:dd/MM/yyyy}}", to: selected)
         }
-        Button("+7 Ngày lịch — {{date +7d:dd/MM/yyyy}}") {
+        Button("+7 Ngày lịch") {
           appendToken("{{date +7d:dd/MM/yyyy}}", to: selected)
         }
-        Button("-1 Tháng trước — {{date -1M:MM/yyyy}}") {
+        Button("-1 Tháng trước (MM/yyyy)") {
           appendToken("{{date -1M:MM/yyyy}}", to: selected)
         }
       }
-      .controlSize(.small)
 
-      Menu("⌨️ Phím & Con trỏ") {
-        Button("Đặt con trỏ tại đây — {{cursor}}") {
+      Menu("Phím bấm, Con trỏ & Clipboard") {
+        Button("Đặt vị trí con trỏ tại đây — {{cursor}}") {
           appendToken("{{cursor}}", to: selected)
         }
-        Button("Nội dung Clipboard hiện tại — {{clipboard}}") {
+        Button("Dán nội dung Clipboard — {{clipboard}}") {
           appendToken("{{clipboard}}", to: selected)
         }
         Divider()
-        Button("Giả lập phím Tab (nhảy ô biểu mẫu) — {{tab}}") {
+        Button("Nhấn phím Tab — {{tab}}") {
           appendToken("{{tab}}", to: selected)
         }
-        Button("Giả lập phím Enter — {{enter}}") {
+        Button("Nhấn phím Enter — {{enter}}") {
           appendToken("{{enter}}", to: selected)
         }
-        Button("Giả lập phím Esc — {{esc}}") {
+        Button("Nhấn phím Esc — {{esc}}") {
           appendToken("{{esc}}", to: selected)
         }
-        Button("Tạm dừng 200ms giữa các bước — {{delay:200}}") {
+        Button("Chờ 200ms — {{delay:200}}") {
           appendToken("{{delay:200}}", to: selected)
         }
         Divider()
-        Button("Mã ngẫu nhiên UUID — {{uuid}}") {
+        Button("Mã UUID ngẫu nhiên — {{uuid}}") {
           appendToken("{{uuid}}", to: selected)
         }
       }
-      .controlSize(.small)
 
-      Menu("⚡️ Chèn Script") {
-        Button("Lệnh Shell nội tuyến — {{shell:...}}") {
+      Menu("Chạy lệnh Script nội tuyến") {
+        Button("Shell Script — {{shell:...}}") {
           appendToken("{{shell:whoami}}", to: selected)
         }
-        Button("AppleScript nội tuyến — {{applescript:...}}") {
+        Button("AppleScript — {{applescript:...}}") {
           appendToken("{{applescript:return (system attribute \"USER\")}}", to: selected)
         }
-        Button("JavaScript (JXA) nội tuyến — {{jxa:...}}") {
+        Button("JavaScript (JXA) — {{jxa:...}}") {
           appendToken("{{jxa:new Date().toLocaleDateString('vi-VN')}}", to: selected)
         }
       }
-      .controlSize(.small)
-
-      Spacer()
-
-      Toggle("Xem trước", isOn: $showLivePreviewBox)
-        .toggleStyle(.button)
-        .controlSize(.small)
+    } label: {
+      Label("Chèn biến {…}", systemImage: "curlybraces")
     }
+    .controlSize(.small)
   }
 
   private func imageEditorBody(for selected: SnippetItem) -> some View {
@@ -1016,10 +1090,10 @@ struct SnippetStudioView: View {
         Image(nsImage: img)
           .resizable()
           .scaledToFit()
-          .frame(maxHeight: 170)
+          .frame(maxHeight: 165)
           .clipShape(RoundedRectangle(cornerRadius: 8))
       } else {
-        Text("Chưa có hình ảnh cho Gõ tắt này")
+        Label("Chưa có hình ảnh cho Gõ tắt này", systemImage: "photo")
           .foregroundStyle(.secondary)
       }
 
@@ -1039,7 +1113,7 @@ struct SnippetStudioView: View {
             store.updateItem(copy)
           }
         }
-        Button("Lấy ảnh từ Clipboard hiện tại") {
+        Button("Dán ảnh từ Clipboard") {
           if let img = NSImage(pasteboard: .general),
              let tiff = img.tiffRepresentation,
              let rep = NSBitmapImageRep(data: tiff),
@@ -1053,8 +1127,36 @@ struct SnippetStudioView: View {
       .controlSize(.small)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25), lineWidth: 1))
+    .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.12), lineWidth: 1))
+  }
+
+  // MARK: - Item & Import/Export Helpers
+
+  private func createNewSnippet(in collectionId: UUID? = nil) {
+    let targetCol = collectionId ?? selectedCollectionId ?? store.collections.first?.id
+    let created = store.createItem(
+      in: targetCol,
+      name: "",
+      abbreviation: "",
+      content: ""
+    )
+    selectedItemId = created.id
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+      abbreviationFieldFocused = true
+    }
+  }
+
+  private func deleteSnippetAndAdvanceSelection(_ id: UUID) {
+    let list = visibleItems
+    let currentIdx = list.firstIndex(where: { $0.id == id }) ?? 0
+    store.deleteItem(id)
+    let updatedList = visibleItems
+    if updatedList.indices.contains(currentIdx) {
+      selectedItemId = updatedList[currentIdx].id
+    } else {
+      selectedItemId = updatedList.last?.id
+    }
   }
 
   private func appendToken(_ token: String, to item: SnippetItem) {
@@ -1062,8 +1164,6 @@ struct SnippetStudioView: View {
     copy.content += token
     store.updateItem(copy)
   }
-
-  // MARK: - Import / Export Actions
 
   private func runAlfredImport() {
     do {
@@ -1100,7 +1200,7 @@ struct SnippetStudioView: View {
     let alert = NSAlert()
     alert.alertStyle = .informational
     alert.messageText = "Tạm dừng gõ tắt của Typinator để tránh nhân đôi?"
-    alert.informativeText = "Dữ liệu từ Typinator đã được nhập sang Maccy. Bạn có muốn Maccy gửi lệnh tạm dừng (Pause Expansions) sang Typinator để hai ứng dụng không cùng bung một từ gõ tắt (như \\bcc) cùng lúc không?"
+    alert.informativeText = "Dữ liệu từ Typinator đã được nhập sang Maccy. Bạn có muốn Maccy gửi lệnh tạm dừng (Pause Expansions) sang Typinator để hai ứng dụng không cùng bung một từ gõ tắt cùng lúc không?"
     alert.addButton(withTitle: "Tạm dừng Typinator ngay")
     alert.addButton(withTitle: "Để sau")
     if alert.runModal() == .alertFirstButtonReturn {
@@ -1159,7 +1259,7 @@ struct SnippetStudioView: View {
   }
 }
 
-// MARK: - Collection Edit & Create Sheets
+// MARK: - Native macOS Form Sheets for Collections
 
 private struct CollectionEditSheet: View {
   @Environment(\.dismiss) private var dismiss
@@ -1171,44 +1271,30 @@ private struct CollectionEditSheet: View {
       Text("Thiết lập Bộ Gõ tắt")
         .font(.headline)
 
-      VStack(alignment: .leading, spacing: 4) {
-        Text("Tên Bộ:")
-          .font(.caption.weight(.semibold))
-        TextField("Tên bộ gõ tắt", text: $collection.name)
-          .textFieldStyle(.roundedBorder)
+      Form {
+        TextField("Tên Bộ:", text: $collection.name)
+        TextField("Tiền tố chung (VD: ; hoặc \\):", text: $collection.keywordPrefix)
+          .font(.system(.body, design: .monospaced))
+        TextField("Hậu tố chung (tuỳ chọn):", text: $collection.keywordSuffix)
+          .font(.system(.body, design: .monospaced))
+        Toggle("Bật tự động bung Gõ tắt cho Bộ này", isOn: $collection.isEnabled)
       }
-
-      HStack(spacing: 12) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Tiền tố chung (Prefix):")
-            .font(.caption.weight(.semibold))
-          TextField("VD: ; hoặc \\", text: $collection.keywordPrefix)
-            .font(.system(.body, design: .monospaced))
-            .textFieldStyle(.roundedBorder)
-        }
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Hậu tố chung (Suffix):")
-            .font(.caption.weight(.semibold))
-          TextField("Tuỳ chọn", text: $collection.keywordSuffix)
-            .font(.system(.body, design: .monospaced))
-            .textFieldStyle(.roundedBorder)
-        }
-      }
-
-      Toggle("Kích hoạt tự động gõ tắt cho Bộ này", isOn: $collection.isEnabled)
+      .formStyle(.grouped)
 
       HStack {
         Spacer()
         Button("Huỷ") { dismiss() }
-        Button("Lưu thay đổi") {
+          .keyboardShortcut(.cancelAction)
+        Button("Lưu") {
           onSave(collection)
           dismiss()
         }
         .buttonStyle(.borderedProminent)
+        .keyboardShortcut(.defaultAction)
       }
     }
     .padding(18)
-    .frame(width: 400)
+    .frame(width: 420, height: 290)
   }
 }
 
@@ -1224,43 +1310,30 @@ private struct NewCollectionSheet: View {
       Text("Tạo Bộ Gõ tắt mới")
         .font(.headline)
 
-      VStack(alignment: .leading, spacing: 4) {
-        Text("Tên Bộ:")
-          .font(.caption.weight(.semibold))
-        TextField("VD: Nghiên cứu khoa học, Cá nhân…", text: $name)
-          .textFieldStyle(.roundedBorder)
+      Form {
+        TextField("Tên Bộ:", text: $name, prompt: Text("VD: Nghiên cứu, Email mẫu…"))
+        TextField("Tiền tố chung:", text: $prefix, prompt: Text("VD: ; hoặc \\"))
+          .font(.system(.body, design: .monospaced))
+        TextField("Hậu tố chung:", text: $suffix, prompt: Text("Tuỳ chọn"))
+          .font(.system(.body, design: .monospaced))
       }
-
-      HStack(spacing: 12) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Tiền tố chung (Prefix):")
-            .font(.caption.weight(.semibold))
-          TextField("VD: ; hoặc \\", text: $prefix)
-            .font(.system(.body, design: .monospaced))
-            .textFieldStyle(.roundedBorder)
-        }
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Hậu tố chung (Suffix):")
-            .font(.caption.weight(.semibold))
-          TextField("Tuỳ chọn", text: $suffix)
-            .font(.system(.body, design: .monospaced))
-            .textFieldStyle(.roundedBorder)
-        }
-      }
+      .formStyle(.grouped)
 
       HStack {
         Spacer()
         Button("Huỷ") { dismiss() }
+          .keyboardShortcut(.cancelAction)
         Button("Tạo Bộ") {
           onCreate(name, prefix, suffix)
           dismiss()
         }
         .buttonStyle(.borderedProminent)
         .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .keyboardShortcut(.defaultAction)
       }
     }
     .padding(18)
-    .frame(width: 390)
+    .frame(width: 420, height: 265)
   }
 }
 
@@ -1272,6 +1345,7 @@ struct SnippetsSettingsPane: View {
   @Default(.expandPlaySound) private var expandPlaySound
 
   @State private var store = SnippetStore.shared
+  @State private var engine = TextExpansionEngine.shared
   @State private var quickImportStatus: String = ""
 
   var body: some View {
@@ -1281,10 +1355,22 @@ struct SnippetsSettingsPane: View {
         Toggle("Giữ nguyên Clipboard gốc sau khi bung Gõ tắt", isOn: $restoreClipboardAfterExpansion)
         Toggle("Phát âm thanh nhẹ khi bung Gõ tắt", isOn: $expandPlaySound)
 
-        Text("Tự động tạm dừng an toàn khi con trỏ ở trong ô mật khẩu (Secure Input) và trong các ứng dụng nằm ở danh sách Bỏ qua (Ignore).")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 8) {
+          Circle()
+            .fill(engine.isEventTapActive ? Color.green : Color.orange)
+            .frame(width: 8, height: 8)
+          Text(engine.isEventTapActive ? "Trạng thái quyền Bàn phím: Đang hoạt động" : "Trạng thái quyền Bàn phím: Chưa cấp quyền")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(engine.isEventTapActive ? Color.secondary : Color.orange)
+
+          if !engine.isEventTapActive {
+            Button("Làm mới & Cấp quyền") {
+              engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
+            }
+            .controlSize(.mini)
+          }
+        }
+        .padding(.top, 2)
       }
 
       Settings.Section(title: "Phím tắt mở nhanh", bottomDivider: true) {
@@ -1292,15 +1378,15 @@ struct SnippetsSettingsPane: View {
           Text("Mở bảng tìm & chèn Gõ tắt:")
           KeyboardShortcuts.Recorder(for: .snippetsPopup)
         }
-        Text("Hỗ trợ tìm Tiếng Việt không dấu theo tên gợi nhớ, từ khoá và nội dung (tương tự Alfred Snippets Viewer).")
+        Text("Hỗ trợ tìm Tiếng Việt không dấu theo tên gợi nhớ, từ khoá và nội dung.")
           .font(.caption)
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
       }
 
-      Settings.Section(title: "Dữ liệu & Công cụ") {
+      Settings.Section(title: "Quản lý & Nhập dữ liệu") {
         HStack(spacing: 10) {
-          Button("Mở Trình quản lý Gõ tắt (Snippet Studio)…") {
+          Button("Mở Quản lý Gõ tắt (Snippet Studio)…") {
             SnippetManagerWindowController.shared.show()
           }
           .buttonStyle(.borderedProminent)
@@ -1312,13 +1398,13 @@ struct SnippetsSettingsPane: View {
 
         HStack(spacing: 8) {
           if SnippetImporter.isTypinatorInstalled {
-            Button("⚡ Nhập từ Typinator…") {
+            Button("Nhập từ Typinator…") {
               SnippetManagerWindowController.shared.showAndImportTypinator()
             }
           }
 
           if SnippetImporter.isAlfredInstalled {
-            Button("🎩 Nhập từ Alfred Snippets") {
+            Button("Nhập từ Alfred Snippets") {
               if let payload = try? SnippetImporter.loadFromInstalledAlfred() {
                 let s = store.importPayload(payload)
                 quickImportStatus = "Đã nhập từ Alfred: +\(s.snippetsImported) mới (cập nhật \(s.snippetsUpdated))."

@@ -28,6 +28,7 @@ class Footer: ItemsContainer {
     items = [
       FooterItem(
         title: "clear",
+        icon: "trash",
         shortcuts: [KeyShortcut(key: .delete, modifierFlags: [.command, .option])],
         help: "clear_tooltip",
         confirmation: .init(
@@ -44,6 +45,7 @@ class Footer: ItemsContainer {
       },
       FooterItem(
         title: "clear_all",
+        icon: "trash.fill",
         shortcuts: [KeyShortcut(key: .delete, modifierFlags: [.command, .option, .shift])],
         help: "clear_all_tooltip",
         confirmation: .init(
@@ -60,6 +62,8 @@ class Footer: ItemsContainer {
       },
       FooterItem(
         title: "snippets_studio",
+        icon: "bolt.horizontal",
+        hasTopDivider: true,
         shortcuts: [KeyShortcut(key: .m)]
       ) {
         Task { @MainActor in
@@ -69,6 +73,7 @@ class Footer: ItemsContainer {
       },
       FooterItem(
         title: "preferences",
+        icon: "gearshape",
         shortcuts: [KeyShortcut(key: .comma)]
       ) {
         Task { @MainActor in
@@ -76,13 +81,25 @@ class Footer: ItemsContainer {
         }
       },
       FooterItem(
+        title: "check_for_updates",
+        icon: "arrow.triangle.2.circlepath"
+      ) {
+        Task { @MainActor in
+          AppState.shared.popup.close()
+          SoftwareUpdater.shared.checkForUpdates()
+        }
+      },
+      FooterItem(
         title: "about",
+        icon: "info.circle",
         help: "about_tooltip"
       ) {
         AppState.shared.openAbout()
       },
       FooterItem(
         title: "quit",
+        icon: "power",
+        hasTopDivider: true,
         shortcuts: [KeyShortcut(key: .q)],
         help: "quit_tooltip"
       ) {

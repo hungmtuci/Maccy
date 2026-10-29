@@ -14,6 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     statusItem.behavior = .removalAllowed
     statusItem.button?.action = #selector(performStatusItemClick)
+    statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
     statusItem.button?.image = Defaults[.menuIcon].image
     statusItem.button?.imagePosition = .imageLeft
     statusItem.button?.target = self
@@ -121,6 +122,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     if !Self.isTesting {
       _ = SnippetStore.shared
+      _ = SoftwareUpdater.shared
       TextExpansionEngine.shared.start()
     }
 
@@ -216,9 +218,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
   @objc
   private func performStatusItemClick() {
-    let modifierFlags = (NSApp.currentEvent?.modifierFlags ?? [])
+    let currentEvent = NSApp.currentEvent
+    let modifierFlags = (currentEvent?.modifierFlags ?? [])
       .union(NSEvent.modifierFlags)
       .intersection(.deviceIndependentFlagsMask)
+
+    if currentEvent?.type == .rightMouseUp || modifierFlags.contains(.control) {
+      let contextMenu = buildStatusBarContextMenu()
+      statusItem.menu = contextMenu
+      statusItem.button?.performClick(nil)
+      statusItem.menu = nil
+      return
+    }
 
     if modifierFlags.contains(.option) {
       Defaults[.ignoreEvents].toggle()
@@ -231,6 +242,188 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     panel.toggle(height: AppState.shared.popup.height, at: .statusItem)
+  }
+
+  @MainActor
+  private func buildStatusBarContextMenu() -> NSMenu {
+    let menu = NSMenu(title: "Maccy")
+    let symConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+
+    func makeItem(
+      _ title: String,
+      symbol: String? = nil,
+      key: String = "",
+      modifiers: NSEvent.ModifierFlags = [.command],
+      state: NSControl.StateValue = .off,
+      action: Selector
+    ) -> NSMenuItem {
+      let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+      item.keyEquivalentModifierMask = modifiers
+      item.target = self
+      item.state = state
+      if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
+        item.image = img.withSymbolConfiguration(symConfig)
+      }
+      return item
+    }
+
+    menu.addItem(makeItem(
+      "Lịch sử Clipboard",
+      symbol: "list.clipboard",
+      key: "v",
+      modifiers: [.command, .shift],
+      action: #selector(menuOpenClipboardPopup)
+    ))
+    menu.addItem(makeItem(
+      "Tìm nhanh Gõ tắt",
+      symbol: "bolt.horizontal",
+      key: "s",
+      modifiers: [.command, .shift],
+      action: #selector(menuOpenSnippetsPopup)
+    ))
+    menu.addItem(makeItem(
+      "Dán văn bản thuần gần nhất",
+      symbol: "doc.plaintext",
+      key: "c",
+      modifiers: [.command, .shift],
+      action: #selector(menuPasteLatestPlainText)
+    ))
+
+    menu.addItem(.separator())
+
+    menu.addItem(makeItem(
+      "Quản lý Gõ tắt (Snippet Studio)…",
+      symbol: "square.split.2x1",
+      key: "m",
+      modifiers: [.command],
+      action: #selector(menuOpenSnippetStudio)
+    ))
+
+    if Defaults[.cloudSyncEnabled] && !Defaults[.cloudSyncFolderPath].isEmpty {
+      menu.addItem(makeItem(
+        "Đồng bộ Google Drive ngay",
+        symbol: "arrow.triangle.2.circlepath.icloud",
+        action: #selector(menuSyncGoogleDriveNow)
+      ))
+    }
+
+    menu.addItem(.separator())
+
+    menu.addItem(makeItem(
+      "Tự động bung Gõ tắt",
+      symbol: "bolt",
+      state: Defaults[.textExpansionEnabled] ? .on : .off,
+      action: #selector(menuToggleTextExpansion)
+    ))
+    menu.addItem(makeItem(
+      "Tạm dừng ghi Clipboard",
+      symbol: "pause.circle",
+      state: Defaults[.ignoreEvents] ? .on : .off,
+      action: #selector(menuToggleIgnoreEvents)
+    ))
+    menu.addItem(makeItem(
+      "Dọn dẹp lịch sử chưa ghim",
+      symbol: "trash",
+      action: #selector(menuClearUnpinnedHistory)
+    ))
+
+    menu.addItem(.separator())
+
+    menu.addItem(makeItem(
+      "Cài đặt…",
+      symbol: "gearshape",
+      key: ",",
+      modifiers: [.command],
+      action: #selector(menuOpenSettings)
+    ))
+
+    let updateTitle: String
+    if let newTag = SoftwareUpdater.shared.availableReleaseTag {
+      updateTitle = "Cập nhật phiên bản mới (\(newTag))…"
+    } else {
+      updateTitle = "Kiểm tra cập nhật (GitHub)…"
+    }
+    menu.addItem(makeItem(
+      updateTitle,
+      symbol: SoftwareUpdater.shared.availableReleaseTag != nil ? "arrow.down.circle.fill" : "arrow.triangle.2.circlepath",
+      action: #selector(menuCheckForUpdates)
+    ))
+
+    menu.addItem(makeItem(
+      "Giới thiệu về Maccy",
+      symbol: "info.circle",
+      action: #selector(menuOpenAbout)
+    ))
+
+    menu.addItem(.separator())
+
+    menu.addItem(makeItem(
+      "Thoát Maccy",
+      symbol: "power",
+      key: "q",
+      modifiers: [.command],
+      action: #selector(menuQuitApp)
+    ))
+
+    return menu
+  }
+
+  @objc @MainActor private func menuOpenClipboardPopup() {
+    AppState.shared.popupMode = .clipboard
+    panel?.open(height: AppState.shared.popup.height, at: .statusItem)
+  }
+
+  @objc @MainActor private func menuOpenSnippetsPopup() {
+    AppState.shared.popupMode = .snippets
+    SnippetStore.shared.ensureValidPopupSelection()
+    panel?.open(height: AppState.shared.popup.height, at: .statusItem)
+  }
+
+  @objc @MainActor private func menuPasteLatestPlainText() {
+    Clipboard.shared.pasteLatestPlainText()
+  }
+
+  @objc @MainActor private func menuOpenSnippetStudio() {
+    AppState.shared.popup.close()
+    SnippetManagerWindowController.shared.show()
+  }
+
+  @objc @MainActor private func menuSyncGoogleDriveNow() {
+    Task { @MainActor in
+      await CloudSyncManager.shared.syncNow()
+      await SnippetStore.shared.syncWithGoogleDrive()
+    }
+  }
+
+  @objc @MainActor private func menuToggleTextExpansion() {
+    Defaults[.textExpansionEnabled].toggle()
+  }
+
+  @objc @MainActor private func menuToggleIgnoreEvents() {
+    Defaults[.ignoreEvents].toggle()
+  }
+
+  @objc @MainActor private func menuClearUnpinnedHistory() {
+    AppState.shared.history.clear()
+  }
+
+  @objc @MainActor private func menuOpenSettings() {
+    AppState.shared.popup.close()
+    AppState.shared.openPreferences()
+  }
+
+  @objc @MainActor private func menuCheckForUpdates() {
+    AppState.shared.popup.close()
+    SoftwareUpdater.shared.checkForUpdates()
+  }
+
+  @objc @MainActor private func menuOpenAbout() {
+    AppState.shared.popup.close()
+    AppState.shared.openAbout()
+  }
+
+  @objc private func menuQuitApp() {
+    AppState.shared.quit()
   }
 
   private func synchronizeMenuIconText() {
@@ -264,24 +457,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func ensureStandardEditMenu() {
-    let hasPasteItem = NSApp.mainMenu?.items
-      .flatMap { $0.submenu?.items ?? [] }
-      .contains { $0.action == #selector(NSText.paste(_:)) } ?? false
-    guard !hasPasteItem else { return }
+    let mainMenu = NSMenu()
 
-    let mainMenu = NSApp.mainMenu ?? NSMenu()
-    let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
-    let editMenu = NSMenu(title: "Edit")
-    editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-    let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+    // 1. Application Menu ("Maccy")
+    let appMenuItem = NSMenuItem(title: "Maccy", action: nil, keyEquivalent: "")
+    let appMenu = NSMenu(title: "Maccy")
+    let aboutItem = appMenu.addItem(withTitle: "Giới thiệu về Maccy", action: #selector(menuOpenAbout), keyEquivalent: "")
+    aboutItem.target = self
+    let updateItem = appMenu.addItem(withTitle: "Kiểm tra cập nhật (GitHub)…", action: #selector(menuCheckForUpdates), keyEquivalent: "")
+    updateItem.target = self
+    appMenu.addItem(.separator())
+    let settingsItem = appMenu.addItem(withTitle: "Cài đặt…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+    settingsItem.target = self
+    let studioItem = appMenu.addItem(withTitle: "Quản lý Gõ tắt…", action: #selector(menuOpenSnippetStudio), keyEquivalent: "m")
+    studioItem.target = self
+    appMenu.addItem(.separator())
+    appMenu.addItem(withTitle: "Ẩn Maccy", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+    appMenu.addItem(.separator())
+    let quitItem = appMenu.addItem(withTitle: "Thoát Maccy", action: #selector(menuQuitApp), keyEquivalent: "q")
+    quitItem.target = self
+    appMenuItem.submenu = appMenu
+    mainMenu.addItem(appMenuItem)
+
+    // 2. File Menu ("Tệp")
+    let fileMenuItem = NSMenuItem(title: "Tệp", action: nil, keyEquivalent: "")
+    let fileMenu = NSMenu(title: "Tệp")
+    fileMenu.addItem(withTitle: "Đóng cửa sổ", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    fileMenuItem.submenu = fileMenu
+    mainMenu.addItem(fileMenuItem)
+
+    // 3. Edit Menu ("Chỉnh sửa")
+    let editMenuItem = NSMenuItem(title: "Chỉnh sửa", action: nil, keyEquivalent: "")
+    let editMenu = NSMenu(title: "Chỉnh sửa")
+    editMenu.addItem(withTitle: "Hoàn tác", action: Selector(("undo:")), keyEquivalent: "z")
+    let redo = editMenu.addItem(withTitle: "Làm lại", action: Selector(("redo:")), keyEquivalent: "Z")
     redo.keyEquivalentModifierMask = [.command, .shift]
     editMenu.addItem(.separator())
-    editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-    editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-    editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-    editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editMenu.addItem(withTitle: "Cắt", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    editMenu.addItem(withTitle: "Sao chép", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    editMenu.addItem(withTitle: "Dán", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    editMenu.addItem(withTitle: "Chọn tất cả", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
     editMenuItem.submenu = editMenu
     mainMenu.addItem(editMenuItem)
+
+    // 4. Window Menu ("Cửa sổ")
+    let windowMenuItem = NSMenuItem(title: "Cửa sổ", action: nil, keyEquivalent: "")
+    let windowMenu = NSMenu(title: "Cửa sổ")
+    windowMenu.addItem(withTitle: "Thu nhỏ", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "")
+    windowMenu.addItem(withTitle: "Thu phóng", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+    windowMenu.addItem(.separator())
+    windowMenu.addItem(withTitle: "Đưa tất cả lên trước", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+    windowMenuItem.submenu = windowMenu
+    mainMenu.addItem(windowMenuItem)
+
     NSApp.mainMenu = mainMenu
+    NSApp.windowsMenu = windowMenu
   }
 }

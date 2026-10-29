@@ -93,7 +93,7 @@ Phiên bản này giữ nguyên triết lý gọn nhẹ của Maccy gốc, đồ
 
 ### 6. 📦 Cài đặt trên máy Mac khác & Tự biên dịch (`build_maccy.sh`)
 - **Cài đặt nhanh từ bản phát hành sẵn (Universal Binary `arm64` + `x86_64`)**:
-  1. Tải gói `Maccy-v3.0.2-custom.zip` mới nhất tại **[GitHub Releases (`hungmtuci/Maccy`)](https://github.com/hungmtuci/Maccy/releases/latest)**.
+  1. Tải gói `Maccy-v3.1.0-custom.zip` mới nhất tại **[GitHub Releases (`hungmtuci/Maccy`)](https://github.com/hungmtuci/Maccy/releases/latest)** (từ bản `3.1.0` trở đi, các bản cập nhật sau có thể bấm **Kiểm tra cập nhật (GitHub)…** ngay trong ứng dụng để tự tải, gỡ cờ Gatekeeper và khởi động lại tự động).
   2. Giải nén và kéo `Maccy.app` vào `/Applications` (chọn **Replace** nếu đã có bản cũ).
   3. Gỡ cờ cách ly Gatekeeper (do bản cá nhân ký ad-hoc) và khởi chạy:
      ```sh

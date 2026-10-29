@@ -16,6 +16,8 @@ class FooterItem: Equatable, Identifiable, HasVisibility {
   let id = UUID()
 
   var title: String
+  var icon: String?
+  var hasTopDivider: Bool
   var shortcuts: [KeyShortcut] = []
   var help: LocalizedStringKey?
   var isSelected: Bool = false
@@ -27,6 +29,8 @@ class FooterItem: Equatable, Identifiable, HasVisibility {
 
   init(
     title: String,
+    icon: String? = nil,
+    hasTopDivider: Bool = false,
     shortcuts: [KeyShortcut] = [],
     help: LocalizedStringKey? = nil,
     confirmation: Confirmation? = nil,
@@ -34,6 +38,8 @@ class FooterItem: Equatable, Identifiable, HasVisibility {
     action: @escaping () -> Void
   ) {
     self.title = title
+    self.icon = icon
+    self.hasTopDivider = hasTopDivider
     self.shortcuts = shortcuts
     self.help = help
     self.confirmation = confirmation
