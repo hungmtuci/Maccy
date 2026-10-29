@@ -118,6 +118,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       Clipboard.shared.pasteLatestPlainText()
     }
 
+    if !Self.isTesting {
+      _ = SnippetStore.shared
+      TextExpansionEngine.shared.start()
+    }
+
     panel = FloatingPanel(
       contentRect: NSRect(origin: .zero, size: Defaults[.windowSize]),
       identifier: Bundle.main.bundleIdentifier ?? "org.p0deje.Maccy",
@@ -191,6 +196,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardShortcuts.Name.popup.shortcut = KeyboardShortcuts.Shortcut(.v, modifiers: [.command, .shift])
       }
       KeyboardShortcuts.Name.pasteLatestPlainText.shortcut = KeyboardShortcuts.Shortcut(.c, modifiers: [.command, .shift])
+    }
+
+    ensureMigration(key: "2026-10-29-default-snippets-cmd-shift-s") {
+      if KeyboardShortcuts.Name.snippetsPopup.shortcut == nil {
+        KeyboardShortcuts.Name.snippetsPopup.shortcut = KeyboardShortcuts.Shortcut(.s, modifiers: [.command, .shift])
+      }
     }
 
     // The following defaults are not used in Maccy 2.x

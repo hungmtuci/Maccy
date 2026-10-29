@@ -78,11 +78,20 @@ Phiên bản này giữ nguyên triết lý gọn nhẹ của Maccy gốc, đồ
 - **Phím tắt mặc định**:
   - **`Command + Shift + V` (`⌘⇧V`)**: Mở nhanh danh sách lịch sử Clipboard.
   - **`Command + Shift + C` (`⌘⇧C`)**: **Dán ngay Plain Text** (văn bản thuần không định dạng) của nội dung copy gần nhất vào ứng dụng đang làm việc (tương thích chống nhân đôi khi dùng chung với Alfred).
+  - **`Command + Shift + S` (`⌘⇧S`)**: **Mở nhanh bảng Tìm & Chèn Gõ tắt (Snippet Viewer)** hỗ trợ Tiếng Việt không dấu (hoặc bấm `⌃Tab` để chuyển chế độ ngay trong popup).
+  - **`Command + M` (`⌘M`)**: Mở **Trình quản lý Gõ tắt & Biểu mẫu động (Snippet Studio)**.
   - **`Command + E` (`⌘E`)**: Đặt tên gợi nhớ (Alias) / Đổi phím ghim / Sửa nội dung mục đang chọn.
   - **`Option + S` (`⌥S`)**: Đồng bộ / Hủy đồng bộ mục đang chọn lên Google Drive.
   - **`Option + Command + S` (`⌥⌘S`)**: Bật/tắt bộ lọc chỉ hiện mục đã đồng bộ.
 
-### 5. 🛠️ Hướng dẫn tự biên dịch nhanh (`build_maccy.sh`)
+### 5. ⚡ Hệ thống Gõ tắt & Biểu mẫu động tích hợp (TextExpander / Typinator / Alfred Snippets)
+- **Mở rộng văn bản & đa phương tiện tức thì**: Bung từ gõ tắt (ví dụ `\bcc`, `;reply`) sang đoạn văn dài, văn bản có định dạng (Rich Text / HTML), hoặc hình ảnh mà **không làm mất nội dung Clipboard gốc** và tương thích hoàn toàn với bộ gõ Tiếng Việt Telex/VNI.
+- **Biểu mẫu tương tác (Fill-in Personalization)**: Tự động bật hộp thoại nổi khi bung snippet chứa biến nhập liệu `{{input:Nhãn=Mặc định}}`, `{{textarea:Ghi chú}}`, menu chọn `{{select:Danh xưng|*Anh|Chị|Thầy|Cô}}`, đoạn tùy chọn `{{optional:Đính kèm=1}}...{{/optional}}` (hỗ trợ cả cú pháp `%fill...%` của TextExpander).
+- **Macro Ngày/Giờ động & Ngày làm việc (Business Days)**: Hỗ trợ cộng/trừ ngày, tuần, tháng, năm và **ngày làm việc bỏ qua Thứ 7 & Chủ Nhật** (`{{date +3bd:dd/MM/yyyy}}`, `{{isodate}}`, `{{clipboard}}`).
+- **Tự động hóa Script & Giả lập bàn phím**: Chạy `Shell Script`, `AppleScript`, `JavaScript (JXA)`, đặt vị trí con trỏ sau khi chèn (`{{cursor}}`), và giả lập phím `{{tab}}`, `{{enter}}`, `{{esc}}`, `{{delay:200}}` để tự điền biểu mẫu nhiều ô.
+- **Nhập dữ liệu 1-chạm từ Typinator & Alfred Snippets + Đồng bộ Google Drive**: Nhập trực tiếp toàn bộ các Bộ (Sets) từ **Typinator** và **Alfred Snippets** (`.alfredsnippets`, `.json`, `.csv`), đi kèm các gói mẫu Ký hiệu Học thuật & AutoCorrect, tự tạm dừng trong ô mật khẩu (`Secure Input`), và đồng bộ hai chiều qua Google Drive (`maccy-snippets.json` hỗ trợ mã hóa AES-256-GCM).
+
+### 6. 🛠️ Hướng dẫn tự biên dịch nhanh (`build_maccy.sh`)
 Hỗ trợ biên dịch trực tiếp bằng Swift Package Manager / CommandLineTools mà không bắt buộc cài đặt toàn bộ Xcode:
 ```sh
 chmod +x build_maccy.sh

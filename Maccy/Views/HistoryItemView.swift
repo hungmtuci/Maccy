@@ -151,6 +151,13 @@ struct HistoryItemView: View {
         } label: {
           Label("Đặt tên gợi nhớ / Chỉnh sửa… (⌘E)", systemImage: "pencil.and.list.clipboard")
         }
+
+        Button {
+          appState.popup.close()
+          SnippetManagerWindowController.shared.showAndCreateFromClipboardItem(item.item)
+        } label: {
+          Label("Lưu thành Gõ tắt (Snippet)…", systemImage: "bolt.horizontal.circle")
+        }
       }
 
       if let sourceText = editableSourceText {

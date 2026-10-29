@@ -39,6 +39,8 @@ enum KeyChord: CaseIterable {
   case extendToPrevious
   case extendToFirst
   case openPreferences
+  case openSnippetStudio
+  case togglePopupMode
   case editCurrentItem
   case pinOrUnpin
   case syncOrUnsync
@@ -127,6 +129,10 @@ enum KeyChord: CaseIterable {
       self = .toggleSyncFilter
     case (.comma, [.command]):
       self = .openPreferences
+    case (.m, [.command]):
+      self = .openSnippetStudio
+    case (.tab, [.control]):
+      self = .togglePopupMode
     case (.e, [.command]):
       self = .editCurrentItem
     case (.return, _),

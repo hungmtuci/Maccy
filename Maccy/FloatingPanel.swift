@@ -83,6 +83,10 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
   }
 
   func open(height: CGFloat, at popupPosition: PopupPosition = Defaults[.popupPosition]) {
+    if let front = NSWorkspace.shared.frontmostApplication,
+       front.bundleIdentifier != Bundle.main.bundleIdentifier {
+      AppState.shared.lastTargetApplication = front
+    }
     let size = Defaults[.windowSize]
     let miniumHeight: CGFloat = AppState.shared.popup.minimumHeight
     let finalWidth = min(frame.width, size.width)

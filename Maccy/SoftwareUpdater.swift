@@ -48,7 +48,7 @@ class SoftwareUpdater {
   }
 
   var currentVersionString: String {
-    (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.7.0-custom"
+    (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "3.0.0-custom"
   }
 
   func checkForUpdates() {

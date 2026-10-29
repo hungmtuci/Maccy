@@ -8,6 +8,7 @@
 "about" = "Thông tin";
 "quit" = "Thoát";
 "preferences" = "Thiết lập…";
+"snippets_studio" = "Trình quản lý Gõ tắt…";
 "clear_alert_message" = "Bạn có chắc chắn muốn xóa lịch sử không?";
 "clear_alert_comment" = "Bạn không thể hoàn tác hành động này.";
 "clear_alert_cancel" = "Hủy bỏ";

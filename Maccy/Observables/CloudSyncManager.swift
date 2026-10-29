@@ -678,6 +678,8 @@ class CloudSyncManager {
       lastSyncError = "Lỗi ghi file đồng bộ: \(error.localizedDescription)"
       logger.error("Failed to write Google Drive sync file: \(error.localizedDescription)")
     }
+
+    await SnippetStore.shared.syncWithGoogleDrive()
   }
 
   private func extractRawPayloads(for item: HistoryItem) -> [RawContentSlice] {

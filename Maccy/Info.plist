@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © Alexey Rodionov • Custom Edition by Hung Le Xuan</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Maccy sử dụng quyền Automation để nhập trực tiếp bộ gõ tắt từ Typinator và chạy AppleScript/JXA trong Snippets.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>UTExportedTypeDeclarations</key>

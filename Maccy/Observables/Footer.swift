@@ -59,6 +59,15 @@ class Footer: ItemsContainer {
         }
       },
       FooterItem(
+        title: "snippets_studio",
+        shortcuts: [KeyShortcut(key: .m)]
+      ) {
+        Task { @MainActor in
+          AppState.shared.popup.close()
+          SnippetManagerWindowController.shared.show()
+        }
+      },
+      FooterItem(
         title: "preferences",
         shortcuts: [KeyShortcut(key: .comma)]
       ) {

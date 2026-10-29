@@ -4,6 +4,11 @@ import Foundation
 import Settings
 import SwiftUI
 
+enum PopupMode: Sendable {
+  case clipboard
+  case snippets
+}
+
 @Observable
 class AppState: Sendable {
   static let shared = AppState(history: History.shared, footer: Footer())
@@ -17,6 +22,10 @@ class AppState: Sendable {
   var navigator: NavigationManager
   var preview: SlideoutController
   var cloudSync: CloudSyncManager { CloudSyncManager.shared }
+  @MainActor var snippets: SnippetStore { SnippetStore.shared }
+
+  var popupMode: PopupMode = .clipboard
+  var lastTargetApplication: NSRunningApplication?
 
   var isEditingItem: Bool = false
   var editingItem: HistoryItemDecorator?
@@ -41,6 +50,7 @@ class AppState: Sendable {
   }
 
   var searchVisible: Bool {
+    if popupMode == .snippets { return true }
     if !Defaults[.showSearch] { return false }
     switch Defaults[.searchVisibility] {
     case .always: return true
@@ -75,7 +85,33 @@ class AppState: Sendable {
   }
 
   @MainActor
+  func triggerSnippetFromPopup(_ item: SnippetItem) {
+    let front = NSWorkspace.shared.frontmostApplication
+    let targetApp = (front?.bundleIdentifier != Bundle.main.bundleIdentifier)
+      ? front
+      : lastTargetApplication
+    popup.close()
+    TextExpansionEngine.shared.expandManually(item, targetApp: targetApp)
+  }
+
+  @MainActor
+  func togglePopupMode() {
+    popupMode = (popupMode == .clipboard) ? .snippets : .clipboard
+    if popupMode == .snippets {
+      snippets.ensureValidPopupSelection()
+    }
+    popup.needsResize = true
+  }
+
+  @MainActor
   func select(flags modifierFlags: NSEvent.ModifierFlags) {
+    if popupMode == .snippets {
+      if let selected = snippets.selectedPopupItem {
+        triggerSnippetFromPopup(selected)
+      }
+      return
+    }
+
     if !navigator.selection.isEmpty {
       if navigator.isMultiSelectInProgress {
         navigator.isManualMultiSelect = false
@@ -147,12 +183,13 @@ class AppState: Sendable {
   func openPreferences() { // swiftlint:disable:this function_body_length
     if settingsWindowController == nil {
       let generalTitle = NSLocalizedString("Title", tableName: "GeneralSettings", comment: "")
+      let snippetsTitle = "Gõ tắt"
       let storageTitle = NSLocalizedString("Title", tableName: "StorageSettings", comment: "")
       let appearanceTitle = NSLocalizedString("Title", tableName: "AppearanceSettings", comment: "")
       let syncTitle = "Google Drive"
       let ignoreTitle = NSLocalizedString("Title", tableName: "IgnoreSettings", comment: "")
       let advancedTitle = NSLocalizedString("Title", tableName: "AdvancedSettings", comment: "")
-      let toolbarTitles = [generalTitle, storageTitle, appearanceTitle, syncTitle, ignoreTitle, advancedTitle]
+      let toolbarTitles = [generalTitle, snippetsTitle, storageTitle, appearanceTitle, syncTitle, ignoreTitle, advancedTitle]
       let titleAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
       let titleWidth = toolbarTitles.reduce(CGFloat.zero) {
         $0 + ($1 as NSString).size(withAttributes: titleAttributes).width
@@ -169,6 +206,14 @@ class AppState: Sendable {
             toolbarIcon: NSImage.gearshape!
           ) {
             GeneralSettingsPane()
+              .frame(minWidth: minimumWidth)
+          },
+          Settings.Pane(
+            identifier: Settings.PaneIdentifier.snippets,
+            title: snippetsTitle,
+            toolbarIcon: NSImage.snippetsBolt!
+          ) {
+            SnippetsSettingsPane()
               .frame(minWidth: minimumWidth)
           },
           Settings.Pane(

@@ -11,7 +11,7 @@ export PATH="$HOME/.local/bin:$PROJECT_DIR:$PATH"
 
 APP_NAME="Maccy"
 BUNDLE_ID="org.p0deje.Maccy"
-VERSION="2.7.0-custom"
+VERSION="3.0.0-custom"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 WORKSPACE_APP_BUNDLE="$(dirname "$PROJECT_DIR")/$APP_NAME.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
@@ -108,9 +108,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 	<key>CFBundleShortVersionString</key>
 	<string>${VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>270</string>
+	<string>300</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © Alexey Rodionov • Custom Edition by Hung Le Xuan</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Maccy sử dụng quyền Automation để nhập trực tiếp bộ gõ tắt từ Typinator và chạy AppleScript/JXA trong Snippets.</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>

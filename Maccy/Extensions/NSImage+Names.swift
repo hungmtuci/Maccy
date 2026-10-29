@@ -7,6 +7,7 @@ extension NSImage {
   static let nosign = NSImage(systemSymbolName: "nosign", accessibilityDescription: "nosign")
   static let gearshape2 = NSImage(systemSymbolName: "gearshape.2", accessibilityDescription: "gearshape2")
   static let icloud = NSImage(systemSymbolName: "icloud.and.arrow.up", accessibilityDescription: "icloud")
+  static let snippetsBolt = NSImage(systemSymbolName: "bolt.horizontal.circle", accessibilityDescription: "snippets")
 }
 
 extension NSImage.Name {

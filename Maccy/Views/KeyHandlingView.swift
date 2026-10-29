@@ -59,6 +59,12 @@ struct KeyHandlingView<Content: View>: View {
           searchQuery = ""
           return .handled
         case .deleteCurrentItem:
+          if appState.popupMode == .snippets {
+            if let selectedId = appState.snippets.selectedPopupItemId {
+              appState.snippets.deleteItem(selectedId)
+            }
+            return .handled
+          }
           if appState.navigator.pasteStackSelected {
             appState.removePasteStack()
           } else {
@@ -83,12 +89,22 @@ struct KeyHandlingView<Content: View>: View {
           guard NSApp.characterPickerWindow == nil else {
             return .ignored
           }
+          if appState.popupMode == .snippets {
+            appState.navigator.isKeyboardNavigating = true
+            appState.snippets.highlightNextInPopup()
+            return .handled
+          }
 
           appState.navigator.highlightNext()
           return .handled
         case .moveToLast:
           guard NSApp.characterPickerWindow == nil else {
             return .ignored
+          }
+          if appState.popupMode == .snippets {
+            appState.navigator.isKeyboardNavigating = true
+            appState.snippets.highlightLastInPopup()
+            return .handled
           }
 
           appState.navigator.highlightLast()
@@ -97,12 +113,22 @@ struct KeyHandlingView<Content: View>: View {
           guard NSApp.characterPickerWindow == nil else {
             return .ignored
           }
+          if appState.popupMode == .snippets {
+            appState.navigator.isKeyboardNavigating = true
+            appState.snippets.highlightPreviousInPopup()
+            return .handled
+          }
 
           appState.navigator.highlightPrevious()
           return .handled
         case .moveToFirst:
           guard NSApp.characterPickerWindow == nil else {
             return .ignored
+          }
+          if appState.popupMode == .snippets {
+            appState.navigator.isKeyboardNavigating = true
+            appState.snippets.highlightFirstInPopup()
+            return .handled
           }
 
           appState.navigator.highlightFirst()
@@ -146,7 +172,22 @@ struct KeyHandlingView<Content: View>: View {
         case .openPreferences:
           appState.openPreferences()
           return .handled
+        case .openSnippetStudio:
+          appState.popup.close()
+          SnippetManagerWindowController.shared.show(
+            selecting: appState.popupMode == .snippets ? appState.snippets.selectedPopupItemId : nil
+          )
+          return .handled
+        case .togglePopupMode:
+          appState.togglePopupMode()
+          return .handled
         case .editCurrentItem:
+          if appState.popupMode == .snippets {
+            let targetId = appState.snippets.selectedPopupItemId
+            appState.popup.close()
+            SnippetManagerWindowController.shared.show(selecting: targetId)
+            return .handled
+          }
           appState.beginEditing()
           return .handled
         case .pinOrUnpin:
@@ -171,7 +212,20 @@ struct KeyHandlingView<Content: View>: View {
           ()
         }
 
-        if let item = appState.history.pressedShortcutItem {
+        if appState.popupMode == .snippets,
+           let event = NSApp.currentEvent,
+           event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command],
+           let ch = event.charactersIgnoringModifiers?.first,
+           let num = Int(String(ch)),
+           (1...9).contains(num) {
+          let list = appState.snippets.filteredPopupItems
+          if list.indices.contains(num - 1) {
+            appState.triggerSnippetFromPopup(list[num - 1])
+            return .handled
+          }
+        }
+
+        if appState.popupMode == .clipboard, let item = appState.history.pressedShortcutItem {
           appState.navigator.select(item: item)
           Task {
             try? await Task.sleep(for: .milliseconds(50))

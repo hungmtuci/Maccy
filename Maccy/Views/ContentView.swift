@@ -3,10 +3,17 @@ import SwiftUI
 
 struct ContentView: View {
   @State private var appState = AppState.shared
+  @State private var snippetStore = SnippetStore.shared
   @State private var modifierFlags = ModifierFlags()
   @State private var scenePhase: ScenePhase = .background
 
   @FocusState private var searchFocused: Bool
+
+  private var activeSearchBinding: Binding<String> {
+    appState.popupMode == .snippets
+      ? $snippetStore.popupSearchQuery
+      : $appState.history.searchQuery
+  }
 
   var body: some View {
     ZStack {
@@ -16,7 +23,7 @@ struct ContentView: View {
         VisualEffectView()
       }
 
-      KeyHandlingView(searchQuery: $appState.history.searchQuery, searchFocused: $searchFocused) {
+      KeyHandlingView(searchQuery: activeSearchBinding, searchFocused: $searchFocused) {
         VStack(spacing: 0) {
           SlideoutView(controller: appState.preview) {
             HeaderView(
@@ -25,10 +32,14 @@ struct ContentView: View {
             )
 
             VStack(alignment: .leading, spacing: 0) {
-              HistoryListView(
-                searchQuery: $appState.history.searchQuery,
-                searchFocused: $searchFocused
-              )
+              if appState.popupMode == .snippets {
+                SnippetPopupListView(searchFocused: $searchFocused)
+              } else {
+                HistoryListView(
+                  searchQuery: $appState.history.searchQuery,
+                  searchFocused: $searchFocused
+                )
+              }
 
               FooterView(footer: appState.footer)
             }

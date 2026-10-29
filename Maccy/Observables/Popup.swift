@@ -55,6 +55,7 @@ class Popup {
 
   init() {
     KeyboardShortcuts.onKeyDown(for: .popup, action: handleFirstKeyDown)
+    KeyboardShortcuts.onKeyDown(for: .snippetsPopup, action: handleSnippetsPopupKeyDown)
     initEventsMonitor()
   }
 
@@ -84,6 +85,7 @@ class Popup {
   func reset() {
     state = .toggle
     KeyboardShortcuts.enable(.popup)
+    KeyboardShortcuts.enable(.snippetsPopup)
   }
 
   func close() {
@@ -99,7 +101,10 @@ class Popup {
 
     var minHeight = self.minimumHeight
     // If the preview is non-empty make sure the window accomodates for it to be visible.
-    if AppState.shared.preview.state.isOpen && AppState.shared.navigator.leadSelection != nil {
+    let hasPreviewableSelection = AppState.shared.popupMode == .snippets
+      ? (SnippetStore.shared.selectedPopupItem != nil)
+      : (AppState.shared.navigator.leadSelection != nil)
+    if AppState.shared.preview.state.isOpen && hasPreviewableSelection {
       minHeight = max(minHeight, Self.minimumPreviewHeight)
     }
     minHeight = max(headerHeight + Self.verticalPadding, minHeight)
@@ -123,13 +128,41 @@ class Popup {
     guard !AppState.shared.isEditingItem else { return }
 
     if isClosed() {
+      AppState.shared.popupMode = .clipboard
       open(height: height)
       state = .opening
       KeyboardShortcuts.disable(.popup)  // Handle events via eventsMonitor. Re-enable on popup close
       return
     }
 
+    if AppState.shared.popupMode != .clipboard {
+      AppState.shared.popupMode = .clipboard
+      needsResize = true
+      return
+    }
+
     // Maccy was not opened via shortcut. We assume toggle mode and close it
+    close()
+  }
+
+  private func handleSnippetsPopupKeyDown() {
+    guard !AppState.shared.isEditingItem else { return }
+
+    if isClosed() {
+      AppState.shared.popupMode = .snippets
+      SnippetStore.shared.ensureValidPopupSelection()
+      open(height: max(height, 260))
+      state = .toggle
+      return
+    }
+
+    if AppState.shared.popupMode != .snippets {
+      AppState.shared.popupMode = .snippets
+      SnippetStore.shared.ensureValidPopupSelection()
+      needsResize = true
+      return
+    }
+
     close()
   }
 
