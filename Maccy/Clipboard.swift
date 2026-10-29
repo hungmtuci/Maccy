@@ -238,8 +238,21 @@ class Clipboard {
   }
 
   @MainActor
-  func deleteCharactersBeforeCursor(count: Int, syntheticTag: Int64) {
+  func deleteCharactersBeforeCursor(
+    count: Int,
+    syntheticTag: Int64,
+    useDirectResponderForMaccy: Bool = false
+  ) {
     guard count > 0 else { return }
+
+    if useDirectResponderForMaccy,
+       let textView = NSApp.keyWindow?.firstResponder as? NSTextView {
+      for _ in 0..<count {
+        textView.deleteBackward(nil)
+      }
+      return
+    }
+
     Accessibility.check()
 
     let source = CGEventSource(stateID: .privateState)
@@ -266,7 +279,8 @@ class Clipboard {
     _ steps: [ExpandedActionStep],
     targetApp: NSRunningApplication? = nil,
     restoreClipboard: Bool = Defaults[.restoreClipboardAfterExpansion],
-    syntheticTag: Int64 = 0x4D43_5953
+    syntheticTag: Int64 = 0x4D43_5953,
+    useDirectResponderForMaccy: Bool = false
   ) async {
     guard !steps.isEmpty else { return }
 
@@ -298,8 +312,12 @@ class Clipboard {
         pasteboard.setString("", forType: .fromMaccy)
         changeCount = pasteboard.changeCount
         sync()
-        postCleanCommandVPaste(syntheticTag: syntheticTag)
-        try? await Task.sleep(for: .milliseconds(65))
+        if useDirectResponderForMaccy && NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) {
+          try? await Task.sleep(for: .milliseconds(25))
+        } else {
+          postCleanCommandVPaste(syntheticTag: syntheticTag)
+          try? await Task.sleep(for: .milliseconds(65))
+        }
 
       case .pasteImage(let pngData):
         pasteboard.clearContents()
@@ -309,8 +327,12 @@ class Clipboard {
         pasteboard.setString("", forType: .fromMaccy)
         changeCount = pasteboard.changeCount
         sync()
-        postCleanCommandVPaste(syntheticTag: syntheticTag)
-        try? await Task.sleep(for: .milliseconds(85))
+        if useDirectResponderForMaccy && NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) {
+          try? await Task.sleep(for: .milliseconds(35))
+        } else {
+          postCleanCommandVPaste(syntheticTag: syntheticTag)
+          try? await Task.sleep(for: .milliseconds(85))
+        }
 
       case .keyPress(let kind, let count):
         guard count > 0 else { continue }

@@ -111,6 +111,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationDidFinishLaunching(_ aNotification: Notification) {
+    ensureStandardEditMenu()
     migrateUserDefaults()
     disableUnusedGlobalHotkeys()
 
@@ -260,5 +261,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardShortcuts.disable(name)
       }
     }
+  }
+
+  private func ensureStandardEditMenu() {
+    let hasPasteItem = NSApp.mainMenu?.items
+      .flatMap { $0.submenu?.items ?? [] }
+      .contains { $0.action == #selector(NSText.paste(_:)) } ?? false
+    guard !hasPasteItem else { return }
+
+    let mainMenu = NSApp.mainMenu ?? NSMenu()
+    let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+    let editMenu = NSMenu(title: "Edit")
+    editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+    redo.keyEquivalentModifierMask = [.command, .shift]
+    editMenu.addItem(.separator())
+    editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editMenuItem.submenu = editMenu
+    mainMenu.addItem(editMenuItem)
+    NSApp.mainMenu = mainMenu
   }
 }

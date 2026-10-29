@@ -68,11 +68,14 @@ private extension Notification.Name {
 
 struct SnippetStudioView: View {
   @State private var store = SnippetStore.shared
+  @State private var engine = TextExpansionEngine.shared
   @Default(.textExpansionEnabled) private var textExpansionEnabled
+  @Default(.ignoreEvents) private var ignoreEvents
 
   @State private var selectedCollectionId: UUID?
   @State private var selectedItemId: UUID?
   @State private var studioSearchQuery: String = ""
+  @State private var liveTestInput: String = ""
 
   @State private var editingCollection: SnippetCollection?
   @State private var isCreatingCollection: Bool = false
@@ -84,6 +87,7 @@ struct SnippetStudioView: View {
   @State private var showLivePreviewBox: Bool = false
 
   @FocusState private var abbreviationFieldFocused: Bool
+  @FocusState private var liveTestFieldFocused: Bool
 
   private var visibleItems: [SnippetItem] {
     store.items(in: selectedCollectionId, searchQuery: studioSearchQuery)
@@ -97,6 +101,10 @@ struct SnippetStudioView: View {
   var body: some View {
     VStack(spacing: 0) {
       studioTopBar
+
+      permissionAndDiagnosticsBar
+
+      liveTestSandboxBar
 
       if let banner = statusBanner {
         HStack(spacing: 8) {
@@ -134,6 +142,7 @@ struct SnippetStudioView: View {
       }
     }
     .onAppear {
+      engine.refreshStatusAndEnsureEventTap()
       if let req = SnippetManagerWindowController.shared.requestedSelectedItemId,
          let found = store.item(for: req) {
         selectedCollectionId = found.collectionId
@@ -150,6 +159,12 @@ struct SnippetStudioView: View {
         SnippetManagerWindowController.shared.triggerTypinatorImportOnOpen = false
         runTypinatorImport()
       }
+    }
+    .onDisappear {
+      engine.isStudioTestFieldFocused = false
+    }
+    .onChange(of: liveTestFieldFocused) { _, focused in
+      engine.isStudioTestFieldFocused = focused
     }
     .onReceive(NotificationCenter.default.publisher(for: .snippetStudioSelectRequested)) { note in
       if let id = note.object as? UUID, let found = store.item(for: id) {
@@ -180,17 +195,54 @@ struct SnippetStudioView: View {
   // MARK: - Top Toolbar
 
   private var studioTopBar: some View {
-    HStack(spacing: 12) {
+    let isReady = textExpansionEnabled && !ignoreEvents && engine.isEventTapActive
+    return HStack(spacing: 10) {
       Toggle(isOn: $textExpansionEnabled) {
         HStack(spacing: 5) {
-          Image(systemName: textExpansionEnabled ? "bolt.circle.fill" : "pause.circle")
-            .foregroundStyle(textExpansionEnabled ? .green : .secondary)
+          Image(systemName: isReady ? "bolt.circle.fill" : (textExpansionEnabled ? "exclamationmark.triangle.fill" : "pause.circle"))
+            .foregroundStyle(isReady ? .green : (textExpansionEnabled ? .orange : .secondary))
           Text(textExpansionEnabled ? "Gõ tắt tự động: Đang bật" : "Gõ tắt tự động: Tạm dừng")
             .font(.system(size: 12.5, weight: .semibold))
         }
       }
       .toggleStyle(.switch)
       .controlSize(.small)
+
+      if textExpansionEnabled {
+        if isReady {
+          HStack(spacing: 4) {
+            Circle()
+              .fill(Color.green)
+              .frame(width: 7, height: 7)
+            Text("Đang bắt phím")
+              .font(.system(size: 11, weight: .semibold))
+              .foregroundStyle(.green)
+          }
+          .padding(.horizontal, 8)
+          .padding(.vertical, 3)
+          .background(Capsule().fill(Color.green.opacity(0.13)))
+        } else {
+          Button {
+            if ignoreEvents {
+              ignoreEvents = false
+            } else {
+              engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
+            }
+          } label: {
+            HStack(spacing: 4) {
+              Image(systemName: "lock.trianglebadge.exclamationmark.fill")
+                .font(.system(size: 10.5))
+              Text(ignoreEvents ? "Đang tắt sự kiện (Bấm bật lại)" : "Thiếu quyền Bàn phím (Bấm cấp quyền)")
+                .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3.5)
+            .background(Capsule().fill(Color.orange))
+          }
+          .buttonStyle(.plain)
+        }
+      }
 
       Spacer()
 
@@ -266,6 +318,115 @@ struct SnippetStudioView: View {
     .padding(.horizontal, 14)
     .padding(.vertical, 9)
     .background(Color(nsColor: .windowBackgroundColor))
+  }
+
+  @ViewBuilder
+  private var permissionAndDiagnosticsBar: some View {
+    if textExpansionEnabled && ignoreEvents {
+      HStack(spacing: 10) {
+        Image(systemName: "pause.circle.fill")
+          .foregroundStyle(.orange)
+        Text("Maccy đang bật chế độ Tạm dừng bắt sự kiện toàn cục (Ignore Events), nên Gõ tắt tự động tạm nghỉ.")
+          .font(.system(size: 12, weight: .medium))
+        Spacer()
+        Button("Bật lại ngay") {
+          ignoreEvents = false
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 8)
+      .background(Color.orange.opacity(0.14))
+    } else if textExpansionEnabled && !engine.isEventTapActive {
+      HStack(alignment: .center, spacing: 10) {
+        Image(systemName: "exclamationmark.triangle.fill")
+          .font(.system(size: 16))
+          .foregroundStyle(.orange)
+
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Chưa kích hoạt được quyền Bàn phím (Accessibility) — Gõ tắt tự động đang bị macOS chặn!")
+            .font(.system(size: 12.5, weight: .bold))
+          Text("Mỗi khi chép đè bản Maccy mới vào /Applications, quyền cũ trong System Settings bị hết hạn chữ ký (dù nút công tắc vẫn hiện bật). Bấm nút bên phải để làm mới 1-chạm rồi bật lại công tắc Maccy.")
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
+        }
+
+        Spacer(minLength: 8)
+
+        Button {
+          engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
+        } label: {
+          Label("Làm mới & Cấp quyền Bàn phím", systemImage: "bolt.shield.fill")
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.orange)
+        .controlSize(.small)
+
+        Button("Mở Cài đặt") {
+          engine.openAccessibilitySettingsPane()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 9)
+      .background(Color.orange.opacity(0.15))
+    } else if textExpansionEnabled && engine.isSecureInputLocked {
+      HStack(spacing: 8) {
+        Image(systemName: "lock.fill")
+          .foregroundStyle(.yellow)
+        Text("Một ứng dụng đang bật Secure Keyboard Input (ô mật khẩu / Terminal / 1Password), có thể tạm chặn gõ tắt trong cửa sổ bảo mật đó.")
+          .font(.system(size: 11.5))
+          .foregroundStyle(.secondary)
+        Spacer()
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 5)
+      .background(Color.yellow.opacity(0.10))
+    }
+  }
+
+  private var liveTestSandboxBar: some View {
+    HStack(spacing: 8) {
+      Image(systemName: "keyboard")
+        .foregroundStyle(Color.accentColor)
+      Text("Ô gõ thử trực tiếp:")
+        .font(.system(size: 11.5, weight: .semibold))
+        .foregroundStyle(.secondary)
+
+      TextField("Bấm vào đây rồi gõ thử từ gõ tắt (VD: 009) để kiểm tra ngay…", text: $liveTestInput)
+        .textFieldStyle(.roundedBorder)
+        .font(.system(size: 12.5))
+        .focused($liveTestFieldFocused)
+        .frame(maxWidth: 420)
+
+      if !liveTestInput.isEmpty {
+        Button("Xoá ô thử") {
+          liveTestInput = ""
+          engine.resetBuffer()
+        }
+        .controlSize(.mini)
+        .buttonStyle(.borderless)
+      }
+
+      Spacer()
+
+      if !engine.lastExpandedSummary.isEmpty {
+        HStack(spacing: 4) {
+          Image(systemName: "checkmark.seal.fill")
+            .foregroundStyle(.green)
+            .font(.system(size: 11))
+          Text("Vừa bung: \(engine.lastExpandedSummary)")
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 6)
+    .background(Color(nsColor: .controlBackgroundColor).opacity(0.65))
   }
 
   // MARK: - Left Sidebar (Collections / Sets)

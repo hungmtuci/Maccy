@@ -8,15 +8,40 @@ struct SnippetPopupListView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.scenePhase) private var scenePhase
   @State private var store = SnippetStore.shared
+  @State private var engine = TextExpansionEngine.shared
+  @Default(.textExpansionEnabled) private var textExpansionEnabled
 
   var body: some View {
     let filtered = store.filteredPopupItems
 
     VStack(alignment: .leading, spacing: 0) {
-      collectionFilterBar
-        .padding(.top, 4)
-        .padding(.bottom, 4)
-        .readHeight(appState, into: \.popup.extraTopHeight)
+      VStack(alignment: .leading, spacing: 4) {
+        collectionFilterBar
+        if textExpansionEnabled && !engine.isEventTapActive {
+          HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+              .foregroundStyle(.orange)
+              .font(.system(size: 11))
+            Text("Gõ tắt tự động thiếu quyền Bàn phím")
+              .font(.system(size: 11, weight: .semibold))
+            Spacer()
+            Button("Cấp quyền ngay") {
+              appState.popup.close()
+              engine.requestOrRepairAccessibilityPermission(resetStaleTCC: true)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.orange)
+            .controlSize(.mini)
+          }
+          .padding(.horizontal, 8)
+          .padding(.vertical, 4)
+          .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.15)))
+          .padding(.horizontal, 6)
+        }
+      }
+      .padding(.top, 4)
+      .padding(.bottom, 4)
+      .readHeight(appState, into: \.popup.extraTopHeight)
 
       Divider()
         .padding(.horizontal, Popup.horizontalSeparatorPadding)
