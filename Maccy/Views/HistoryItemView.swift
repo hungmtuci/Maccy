@@ -41,12 +41,25 @@ struct HistoryItemView: View {
     }
   }
 
+  private static let vietnameseLocale = Locale(identifier: "vi_VN")
+
   private var detectedURL: URL? {
     guard !item.hasImage, !item.hasFileURLs else { return nil }
     return Clipboard.extractURL(from: item.item)
   }
 
-  private var editableSourceText: String? {
+  private var canTransformText: Bool {
+    !item.hasImage && !item.hasFileURLs && (item.hasPlainText || item.hasRichText || !item.title.isEmpty)
+  }
+
+  private var looksLikeJSON: Bool {
+    guard canTransformText, item.item.totalByteCount <= 2_097_152 else { return false }
+    let prefix = item.item.previewableTextPrefix(maxBytes: 256).text
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return prefix.hasPrefix("{") || prefix.hasPrefix("[")
+  }
+
+  private func resolveEditableSourceText() -> String? {
     guard !item.hasImage, !item.hasFileURLs else { return nil }
     if let fullText = item.item.text, !fullText.isEmpty {
       return fullText
@@ -55,19 +68,21 @@ struct HistoryItemView: View {
     return preview.isEmpty ? nil : preview
   }
 
-  private var formattedJSONCandidate: (pretty: String, minified: String)? {
-    guard let raw = editableSourceText?.trimmingCharacters(in: .whitespacesAndNewlines),
-          raw.count <= 2_097_152,
+  private func formatJSON(prettyPrinted: Bool) -> String? {
+    guard let raw = resolveEditableSourceText()?.trimmingCharacters(in: .whitespacesAndNewlines),
+          raw.utf8.count <= 2_097_152,
           (raw.hasPrefix("{") || raw.hasPrefix("[")),
           let data = raw.data(using: .utf8),
-          let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
-          let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys]),
-          let minifiedData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.sortedKeys]),
-          let pretty = String(data: prettyData, encoding: .utf8),
-          let minified = String(data: minifiedData, encoding: .utf8) else {
+          let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else {
       return nil
     }
-    return (pretty, minified)
+    let options: JSONSerialization.WritingOptions = prettyPrinted
+      ? [.prettyPrinted, .sortedKeys]
+      : [.sortedKeys]
+    guard let outData = try? JSONSerialization.data(withJSONObject: jsonObj, options: options) else {
+      return nil
+    }
+    return String(data: outData, encoding: .utf8)
   }
 
   private func copyTransformedText(_ transformed: String, pasteImmediately: Bool = false) {
@@ -182,10 +197,11 @@ struct HistoryItemView: View {
         }
       }
 
-      if let sourceText = editableSourceText {
+      if canTransformText {
         Divider()
         Menu {
           Button("Xoá khoảng trắng & dòng trống thừa") {
+            guard let sourceText = resolveEditableSourceText() else { return }
             let cleaned = sourceText
               .components(separatedBy: .newlines)
               .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -196,37 +212,46 @@ struct HistoryItemView: View {
           }
 
           Button("Gộp thành 1 dòng duy nhất") {
+            guard let sourceText = resolveEditableSourceText() else { return }
             let singleLine = sourceText
               .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
               .trimmingCharacters(in: .whitespacesAndNewlines)
             copyTransformedText(singleLine)
           }
 
-          if let json = formattedJSONCandidate {
+          if looksLikeJSON {
             Divider()
             Button("Định dạng JSON đẹp (Pretty Print)") {
-              copyTransformedText(json.pretty)
+              if let pretty = formatJSON(prettyPrinted: true) {
+                copyTransformedText(pretty)
+              }
             }
             Button("Nén gọn JSON (Minify)") {
-              copyTransformedText(json.minified)
+              if let minified = formatJSON(prettyPrinted: false) {
+                copyTransformedText(minified)
+              }
             }
           }
 
           Divider()
 
           Button("CHỮ IN HOA") {
-            copyTransformedText(sourceText.uppercased(with: Locale(identifier: "vi_VN")))
+            guard let sourceText = resolveEditableSourceText() else { return }
+            copyTransformedText(sourceText.uppercased(with: Self.vietnameseLocale))
           }
 
           Button("chữ thường") {
-            copyTransformedText(sourceText.lowercased(with: Locale(identifier: "vi_VN")))
+            guard let sourceText = resolveEditableSourceText() else { return }
+            copyTransformedText(sourceText.lowercased(with: Self.vietnameseLocale))
           }
 
           Button("Viết Hoa Đầu Từ") {
-            copyTransformedText(sourceText.capitalized(with: Locale(identifier: "vi_VN")))
+            guard let sourceText = resolveEditableSourceText() else { return }
+            copyTransformedText(sourceText.capitalized(with: Self.vietnameseLocale))
           }
 
           Button("Bỏ dấu Tiếng Việt") {
+            guard let sourceText = resolveEditableSourceText() else { return }
             copyTransformedText(sourceText.removingVietnameseDiacriticsPreservingCase)
           }
         } label: {

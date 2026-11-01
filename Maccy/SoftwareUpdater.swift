@@ -78,7 +78,7 @@ final class SoftwareUpdater {
   }
 
   var currentVersionString: String {
-    (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "3.1.0-custom"
+    (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "3.1.1-custom"
   }
 
   func checkForUpdates() {
@@ -306,16 +306,20 @@ final class SoftwareUpdater {
     }
   }
 
+  private static let progressMBFormatter: ByteCountFormatter = {
+    let formatter = ByteCountFormatter()
+    formatter.allowedUnits = [.useMB]
+    formatter.countStyle = .file
+    return formatter
+  }()
+
   private func updateDownloadProgress(received: Int64, expected: Int64) {
-    let mbFormatter = ByteCountFormatter()
-    mbFormatter.allowedUnits = [.useMB]
-    mbFormatter.countStyle = .file
-    let recStr = mbFormatter.string(fromByteCount: received)
+    let recStr = Self.progressMBFormatter.string(fromByteCount: received)
 
     if expected > 0 {
       let ratio = min(max(Double(received) / Double(expected), 0.02), 0.88)
       downloadProgress = ratio
-      let expStr = mbFormatter.string(fromByteCount: expected)
+      let expStr = Self.progressMBFormatter.string(fromByteCount: expected)
       let pct = Int((Double(received) / Double(expected)) * 100)
       statusMessage = "Đang tải về… \(min(pct, 100))% (\(recStr) / \(expStr))"
     } else {

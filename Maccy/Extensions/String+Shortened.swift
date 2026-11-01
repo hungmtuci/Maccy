@@ -43,6 +43,8 @@ extension Data {
 }
 
 extension String {
+  private nonisolated static let vietnameseLocale = Locale(identifier: "vi_VN")
+
   nonisolated func shortened(to maxLength: Int) -> String {
     guard maxLength > 0 else { return "" }
     guard let end = index(startIndex, offsetBy: maxLength, limitedBy: endIndex), end != endIndex else {
@@ -56,19 +58,39 @@ extension String {
   /// so searching "dong bo du lieu" matches "Đồng bộ dữ liệu".
   nonisolated var foldingVietnameseDiacritics: String {
     guard !isEmpty else { return "" }
-    return self
-      .folding(options: [.diacriticInsensitive, .widthInsensitive, .caseInsensitive], locale: Locale(identifier: "vi_VN"))
-      .replacingOccurrences(of: "đ", with: "d")
-      .replacingOccurrences(of: "Đ", with: "d")
+    // Fast path for pure ASCII text (code, URLs, English): avoids ICU folding + extra scans
+    if utf8.allSatisfy({ $0 < 0x80 }) {
+      return lowercased()
+    }
+    var folded = self.folding(
+      options: [.diacriticInsensitive, .widthInsensitive, .caseInsensitive],
+      locale: Self.vietnameseLocale
+    )
+    // In UTF-8, both 'đ' (C4 91) and 'Đ' (C4 90) start with lead byte 0xC4
+    if folded.utf8.contains(0xC4) {
+      folded = folded
+        .replacingOccurrences(of: "đ", with: "d")
+        .replacingOccurrences(of: "Đ", with: "d")
+    }
+    return folded
   }
 
   /// Strips Vietnamese diacritics while preserving uppercase/lowercase letters (e.g. "Nguyễn Văn Đạt" -> "Nguyen Van Dat").
   nonisolated var removingVietnameseDiacriticsPreservingCase: String {
     guard !isEmpty else { return "" }
-    return self
-      .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "vi_VN"))
-      .replacingOccurrences(of: "đ", with: "d")
-      .replacingOccurrences(of: "Đ", with: "D")
+    if utf8.allSatisfy({ $0 < 0x80 }) {
+      return self
+    }
+    var folded = self.folding(
+      options: [.diacriticInsensitive, .widthInsensitive],
+      locale: Self.vietnameseLocale
+    )
+    if folded.utf8.contains(0xC4) {
+      folded = folded
+        .replacingOccurrences(of: "đ", with: "d")
+        .replacingOccurrences(of: "Đ", with: "D")
+    }
+    return folded
   }
 
   /// Finds `query` in `self`, supporting both exact match and Vietnamese unaccented (tiếng Việt không dấu) match,
@@ -76,7 +98,8 @@ extension String {
   nonisolated func rangeByVietnameseSearch(
     of query: String,
     options: NSString.CompareOptions,
-    precomputedFoldedSelf: String? = nil
+    precomputedFoldedSelf: String? = nil,
+    precomputedFoldedQuery: String? = nil
   ) -> Range<String.Index>? {
     guard !query.isEmpty, !isEmpty else { return nil }
 
@@ -95,7 +118,7 @@ extension String {
 
     // 3. Full Vietnamese folding match (handles đ/Đ <-> d and regex on unaccented text)
     let foldedSelf = precomputedFoldedSelf ?? self.foldingVietnameseDiacritics
-    let foldedQuery = query.foldingVietnameseDiacritics
+    let foldedQuery = precomputedFoldedQuery ?? query.foldingVietnameseDiacritics
 
     guard let foldedRange = foldedSelf.range(of: foldedQuery, options: options) else {
       return nil
@@ -108,20 +131,29 @@ extension String {
   /// "Cấy ghép Implant nha khoa cơ bản - Khóa 41"), returning merged highlight ranges when ALL tokens match.
   nonisolated func multiWordRangesByVietnameseSearch(
     of query: String,
-    precomputedFoldedSelf: String? = nil
+    precomputedFoldedSelf: String? = nil,
+    precomputedTokens: [(raw: String, folded: String)]? = nil
   ) -> [Range<String.Index>]? {
-    let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
-    guard tokens.count >= 2, !isEmpty else { return nil }
+    let tokenPairs: [(raw: String, folded: String)]
+    if let precomputedTokens {
+      tokenPairs = precomputedTokens
+    } else {
+      let rawTokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
+      guard rawTokens.count >= 2 else { return nil }
+      tokenPairs = rawTokens.map { ($0, $0.foldingVietnameseDiacritics) }
+    }
+    guard tokenPairs.count >= 2, !isEmpty else { return nil }
 
     let foldedSelf = precomputedFoldedSelf ?? self.foldingVietnameseDiacritics
     var collected: [Range<String.Index>] = []
-    collected.reserveCapacity(tokens.count)
+    collected.reserveCapacity(tokenPairs.count)
 
-    for token in tokens {
+    for pair in tokenPairs {
       guard let range = self.rangeByVietnameseSearch(
-        of: token,
+        of: pair.raw,
         options: .caseInsensitive,
-        precomputedFoldedSelf: foldedSelf
+        precomputedFoldedSelf: foldedSelf,
+        precomputedFoldedQuery: pair.folded
       ) else {
         return nil
       }

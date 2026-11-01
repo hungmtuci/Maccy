@@ -13,10 +13,13 @@ nonisolated struct ActiveExpansionCandidate: Sendable {
 }
 
 private nonisolated struct SnippetSearchEntry: Sendable {
+  var sourceItemUpdatedAt: Date
+  var sourceCollectionUpdatedAt: Date
   var foldedName: String
   var foldedAbbreviation: String
   var foldedCollectionName: String
   var foldedContent: String
+  var singleLinePreview: String
 }
 
 @Observable
@@ -26,16 +29,20 @@ class SnippetStore {
 
   private let logger = Logger(label: "org.p0deje.Maccy.Snippets")
   private nonisolated static let localFileName = "maccy-snippets-local.json"
-  private nonisolated static let cloudFileName = "maccy-snippets.json"
+  nonisolated static let cloudFileName = "maccy-snippets.json"
 
   private var allCollections: [UUID: SnippetCollection] = [:]
   private var allItems: [UUID: SnippetItem] = [:]
-  private var searchIndex: [UUID: SnippetSearchEntry] = [:]
+  @ObservationIgnored private var searchIndex: [UUID: SnippetSearchEntry] = [:]
+  @ObservationIgnored private var itemCountsByCollection: [UUID: Int] = [:]
+  @ObservationIgnored private var immediateBuckets: [Character: [ActiveExpansionCandidate]] = [:]
+  @ObservationIgnored private var delimiterBuckets: [Character: [ActiveExpansionCandidate]] = [:]
 
   private(set) var collections: [SnippetCollection] = []
   private(set) var items: [SnippetItem] = []
   private(set) var activeExpansionCandidates: [ActiveExpansionCandidate] = []
   private(set) var maxAbbreviationLength: Int = 24
+  @ObservationIgnored private(set) var lastObservedCloudModificationDate: Date?
 
   // Popup Snippet Mode state
   var popupSearchQuery: String = "" {
@@ -96,7 +103,60 @@ class SnippetStore {
   }
 
   func itemCount(in collectionId: UUID) -> Int {
-    items.reduce(0) { $0 + ($1.collectionId == collectionId ? 1 : 0) }
+    itemCountsByCollection[collectionId] ?? 0
+  }
+
+  func singleLinePreview(for item: SnippetItem) -> String {
+    if let cached = searchIndex[item.id]?.singleLinePreview {
+      return cached
+    }
+    return Self.makeSingleLinePreview(item.content)
+  }
+
+  func immediateCandidates(endingWith lastChar: Character) -> [ActiveExpansionCandidate] {
+    immediateBuckets[Self.bucketKey(for: lastChar)] ?? []
+  }
+
+  func delimiterCandidates(endingWith lastChar: Character) -> [ActiveExpansionCandidate] {
+    delimiterBuckets[Self.bucketKey(for: lastChar)] ?? []
+  }
+
+  nonisolated static func bucketKey(for char: Character) -> Character {
+    if let ascii = char.asciiValue {
+      if ascii >= 65 && ascii <= 90 {
+        return Character(UnicodeScalar(ascii + 32))
+      }
+      return char
+    }
+    return char.lowercased().last ?? char
+  }
+
+  nonisolated static func makeSingleLinePreview(_ raw: String, maxChars: Int = 140) -> String {
+    guard !raw.isEmpty else { return "" }
+    let prefix = raw.shortened(to: maxChars * 3)
+    var out = ""
+    out.reserveCapacity(min(prefix.count, maxChars))
+    var pendingSpace = false
+    var count = 0
+
+    for ch in prefix {
+      if ch.isWhitespace || ch.isNewline {
+        if !out.isEmpty {
+          pendingSpace = true
+        }
+      } else {
+        if pendingSpace {
+          out.append(" ")
+          count += 1
+          pendingSpace = false
+          if count >= maxChars { break }
+        }
+        out.append(ch)
+        count += 1
+        if count >= maxChars { break }
+      }
+    }
+    return out
   }
 
   func items(in collectionId: UUID?, searchQuery: String = "") -> [SnippetItem] {
@@ -355,7 +415,34 @@ class SnippetStore {
       copy.triggerMode = .manualOnly
     }
     copy.updatedAt = Date.now
+
+    let previous = allItems[copy.id]
     allItems[copy.id] = copy
+
+    // Fast O(1) incremental path when only body/payload fields changed (e.g. typing in Studio TextEditor)
+    if let prev = previous,
+       !prev.isDeleted,
+       !copy.isDeleted,
+       prev.collectionId == copy.collectionId,
+       prev.abbreviation == copy.abbreviation,
+       prev.name == copy.name,
+       prev.isEnabled == copy.isEnabled,
+       prev.triggerMode == copy.triggerMode,
+       prev.caseMode == copy.caseMode,
+       prev.wholeWord == copy.wholeWord,
+       let col = allCollections[copy.collectionId],
+       let itemIdx = items.firstIndex(where: { $0.id == copy.id }) {
+      items[itemIdx] = copy
+      let effAbbr = copy.effectiveAbbreviation(in: col)
+      searchIndex[copy.id] = Self.buildSearchEntry(for: copy, collection: col, effectiveAbbreviation: effAbbr)
+      if let candIdx = activeExpansionCandidates.firstIndex(where: { $0.item.id == copy.id }) {
+        activeExpansionCandidates[candIdx].item = copy
+        rebuildExpansionBuckets(from: activeExpansionCandidates)
+      }
+      scheduleSaveAndSync()
+      return
+    }
+
     rebuildCaches()
     scheduleSaveAndSync()
   }
@@ -393,7 +480,17 @@ class SnippetStore {
     target.lastUsedAt = now
     target.updatedAt = now
     allItems[itemId] = target
-    rebuildCaches()
+    if let idx = items.firstIndex(where: { $0.id == itemId }) {
+      items[idx] = target
+    }
+    if var existingEntry = searchIndex[itemId] {
+      existingEntry.sourceItemUpdatedAt = now
+      searchIndex[itemId] = existingEntry
+    }
+    if let candIdx = activeExpansionCandidates.firstIndex(where: { $0.item.id == itemId }) {
+      activeExpansionCandidates[candIdx].item = target
+      rebuildExpansionBuckets(from: activeExpansionCandidates)
+    }
     scheduleSaveAndSync()
   }
 
@@ -561,6 +658,42 @@ class SnippetStore {
     return def
   }
 
+  private nonisolated static func buildSearchEntry(
+    for item: SnippetItem,
+    collection: SnippetCollection,
+    effectiveAbbreviation: String
+  ) -> SnippetSearchEntry {
+    let contentSample = item.content.shortened(to: 8_192)
+    return SnippetSearchEntry(
+      sourceItemUpdatedAt: item.updatedAt,
+      sourceCollectionUpdatedAt: collection.updatedAt,
+      foldedName: item.displayTitle.foldingVietnameseDiacritics,
+      foldedAbbreviation: effectiveAbbreviation.foldingVietnameseDiacritics,
+      foldedCollectionName: collection.name.foldingVietnameseDiacritics,
+      foldedContent: contentSample.foldingVietnameseDiacritics,
+      singleLinePreview: makeSingleLinePreview(item.content)
+    )
+  }
+
+  private func rebuildExpansionBuckets(from orderedCandidates: [ActiveExpansionCandidate]) {
+    var imm: [Character: [ActiveExpansionCandidate]] = [:]
+    var del: [Character: [ActiveExpansionCandidate]] = [:]
+    for cand in orderedCandidates {
+      guard let lastChar = cand.lowercasedAbbreviation.last else { continue }
+      let key = Self.bucketKey(for: lastChar)
+      switch cand.item.triggerMode {
+      case .immediate:
+        imm[key, default: []].append(cand)
+      case .afterDelimiter:
+        del[key, default: []].append(cand)
+      case .manualOnly:
+        break
+      }
+    }
+    self.immediateBuckets = imm
+    self.delimiterBuckets = del
+  }
+
   private func rebuildCaches() {
     let activeCols = allCollections.values
       .filter { !$0.isDeleted }
@@ -583,22 +716,29 @@ class SnippetStore {
       }
     self.items = activeItems
 
+    let previousIndex = self.searchIndex
     var newSearchIndex: [UUID: SnippetSearchEntry] = [:]
     newSearchIndex.reserveCapacity(activeItems.count)
+
+    var counts: [UUID: Int] = [:]
+    counts.reserveCapacity(activeCols.count)
 
     var newCandidates: [ActiveExpansionCandidate] = []
     var longest = 16
 
     for item in activeItems {
       guard let col = colMap[item.collectionId] else { continue }
+      counts[col.id, default: 0] += 1
       let effAbbr = item.effectiveAbbreviation(in: col)
-      let contentSample = item.content.shortened(to: 8_192)
-      newSearchIndex[item.id] = SnippetSearchEntry(
-        foldedName: item.displayTitle.foldingVietnameseDiacritics,
-        foldedAbbreviation: effAbbr.foldingVietnameseDiacritics,
-        foldedCollectionName: col.name.foldingVietnameseDiacritics,
-        foldedContent: contentSample.foldingVietnameseDiacritics
-      )
+
+      // Reuse pre-folded Vietnamese search entry if neither item nor parent collection changed
+      if let existing = previousIndex[item.id],
+         existing.sourceItemUpdatedAt == item.updatedAt,
+         existing.sourceCollectionUpdatedAt == col.updatedAt {
+        newSearchIndex[item.id] = existing
+      } else {
+        newSearchIndex[item.id] = Self.buildSearchEntry(for: item, collection: col, effectiveAbbreviation: effAbbr)
+      }
 
       if col.isEnabled && item.isEnabled && item.triggerMode != .manualOnly && !effAbbr.isEmpty {
         longest = max(longest, effAbbr.count)
@@ -621,9 +761,11 @@ class SnippetStore {
       return lhs.collection.sortOrder < rhs.collection.sortOrder
     }
 
+    self.itemCountsByCollection = counts
     self.searchIndex = newSearchIndex
     self.activeExpansionCandidates = newCandidates
     self.maxAbbreviationLength = min(max(longest + 2, 24), 128)
+    rebuildExpansionBuckets(from: newCandidates)
     ensureValidPopupSelection()
   }
 
@@ -698,7 +840,7 @@ class SnippetStore {
     let passphrase = Defaults[.cloudSyncPassphrase].trimmingCharacters(in: .whitespacesAndNewlines)
     let deviceName = Host.current().localizedName ?? "Mac"
 
-    let mergedOutcome = await Task.detached(priority: .utility) { () -> (SnippetSyncDatabase, Bool)? in
+    let mergedOutcome = await Task.detached(priority: .utility) { () -> (SnippetSyncDatabase, Bool, Date?)? in
       try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
 
       let key: SymmetricKey? = (encryptionEnabled && !passphrase.isEmpty)
@@ -722,10 +864,15 @@ class SnippetStore {
       let decoder = JSONDecoder()
       decoder.dateDecodingStrategy = .iso8601
 
+      var primaryRemoteDB: SnippetSyncDatabase?
+
       for url in candidateURLs where FileManager.default.fileExists(atPath: url.path) {
         guard let rawData = try? Data(contentsOf: url),
               let remoteDB = try? decoder.decode(SnippetSyncDatabase.self, from: rawData) else {
           continue
+        }
+        if url == primaryURL {
+          primaryRemoteDB = remoteDB
         }
 
         for (colId, remoteCol) in remoteDB.collections {
@@ -756,44 +903,81 @@ class SnippetStore {
         }
       }
 
-      // Prepare outbound database (encrypting snippet bodies if AES-256-GCM is turned on)
-      var cloudItems: [UUID: SnippetItem] = [:]
-      cloudItems.reserveCapacity(mergedItems.count)
-      for (id, plainItem) in mergedItems {
-        cloudItems[id] = Self.prepareCloudSnippetItem(plainItem, key: key)
+      // Prune tombstones older than 30 days
+      let tombstoneCutoff = Date.now.addingTimeInterval(-30 * 86_400)
+      mergedCols = mergedCols.filter { !$0.value.isDeleted || $0.value.updatedAt >= tombstoneCutoff }
+      mergedItems = mergedItems.filter { !$0.value.isDeleted || $0.value.updatedAt >= tombstoneCutoff }
+
+      // Determine whether Google Drive file actually needs to be written (avoids two-Mac ping-pong uploads)
+      var remoteNeedsWrite = (primaryRemoteDB == nil) || (candidateURLs.count > 1)
+      if !remoteNeedsWrite, let primary = primaryRemoteDB {
+        if primary.collections.count != mergedCols.count || primary.items.count != mergedItems.count {
+          remoteNeedsWrite = true
+        } else {
+          for (colId, col) in mergedCols where primary.collections[colId]?.updatedAt != col.updatedAt {
+            remoteNeedsWrite = true
+            break
+          }
+          if !remoteNeedsWrite {
+            let shouldEncrypt = (key != nil)
+            for (itemId, item) in mergedItems {
+              guard let remItem = primary.items[itemId] else {
+                remoteNeedsWrite = true
+                break
+              }
+              if remItem.updatedAt != item.updatedAt || (remItem.isPayloadEncrypted == true) != shouldEncrypt {
+                remoteNeedsWrite = true
+                break
+              }
+            }
+          }
+        }
       }
 
-      let outDB = SnippetSyncDatabase(
+      if remoteNeedsWrite {
+        var cloudItems: [UUID: SnippetItem] = [:]
+        cloudItems.reserveCapacity(mergedItems.count)
+        for (id, plainItem) in mergedItems {
+          cloudItems[id] = Self.prepareCloudSnippetItem(plainItem, key: key)
+        }
+
+        let outDB = SnippetSyncDatabase(
+          version: 1,
+          updatedAt: Date.now,
+          deviceName: deviceName,
+          collections: mergedCols,
+          items: cloudItems
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let encoded = try? encoder.encode(outDB) else {
+          return nil
+        }
+        try? encoded.write(to: primaryURL, options: [.atomic])
+
+        for conflictURL in candidateURLs.dropFirst() {
+          try? FileManager.default.removeItem(at: conflictURL)
+        }
+      }
+
+      let attrs = try? FileManager.default.attributesOfItem(atPath: primaryURL.path)
+      let observedModDate = attrs?[.modificationDate] as? Date
+
+      let plainMergedDB = SnippetSyncDatabase(
         version: 1,
         updatedAt: Date.now,
         deviceName: deviceName,
         collections: mergedCols,
-        items: cloudItems
-      )
-      let encoder = JSONEncoder()
-      encoder.outputFormatting = [.sortedKeys]
-      encoder.dateEncodingStrategy = .iso8601
-      guard let encoded = try? encoder.encode(outDB) else {
-        return nil
-      }
-      try? encoded.write(to: primaryURL, options: [.atomic])
-
-      // Remove merged conflict copies
-      for conflictURL in candidateURLs.dropFirst() {
-        try? FileManager.default.removeItem(at: conflictURL)
-      }
-
-      let plainMergedDB = SnippetSyncDatabase(
-        version: 1,
-        updatedAt: outDB.updatedAt,
-        deviceName: deviceName,
-        collections: mergedCols,
         items: mergedItems
       )
-      return (plainMergedDB, localChangedFromRemote)
+      return (plainMergedDB, localChangedFromRemote, observedModDate)
     }.value
 
-    if let (mergedPlainDB, changedFromRemote) = mergedOutcome {
+    if let (mergedPlainDB, changedFromRemote, modDate) = mergedOutcome {
+      if let modDate {
+        self.lastObservedCloudModificationDate = modDate
+      }
       if changedFromRemote {
         self.allCollections = mergedPlainDB.collections
         self.allItems = mergedPlainDB.items

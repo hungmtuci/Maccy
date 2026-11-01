@@ -2,6 +2,39 @@ import AppKit
 import Foundation
 
 nonisolated enum SnippetTemplateEngine {
+  private static let vietnameseLocale = Locale(identifier: "vi_VN")
+  private static let optionalSectionRegex = try? NSRegularExpression(
+    pattern: "\\{\\{optional:([^\\}]+)\\}\\}([\\s\\S]*?)\\{\\{/optional\\}\\}"
+  )
+  private static let inlineControlRegex = try? NSRegularExpression(
+    pattern: "\\{\\{(input|textarea|select):([^\\}]+)\\}\\}"
+  )
+  private static let legacyFillPartRegex = try? NSRegularExpression(
+    pattern: "%fillpart:(?:name=)?([^:%]+)(?::default=([^%]+))?%([\\s\\S]*?)%fillpartend%",
+    options: [.caseInsensitive]
+  )
+  private static let legacyFillTextRegex = try? NSRegularExpression(
+    pattern: "%fill(text|area):(?:name=)?([^:%]+)(?::default=([^:%]*))?(?::width=[0-9]+)?%",
+    options: [.caseInsensitive]
+  )
+  private static let legacyFillPopupRegex = try? NSRegularExpression(
+    pattern: "%fillpopup:(?:name=)?([^:%]+):([^%]+)%",
+    options: [.caseInsensitive]
+  )
+  private static let randomMacroRegex = try? NSRegularExpression(
+    pattern: "\\{\\{random:([0-9]+)-([0-9]+)\\}\\}"
+  )
+  private static let dateMacroRegex = try? NSRegularExpression(
+    pattern: "\\{\\{?(date|time|datetime|isodate)(?:\\s*([+-]\\d+\\s*(?:bd|d|w|M|m|y|h)))?(?::([^\\}]+))?\\}?\\}"
+  )
+  private static let inlineScriptRegex = try? NSRegularExpression(
+    pattern: "\\{\\{(shell|applescript|jxa):([\\s\\S]*?)\\}\\}"
+  )
+  private static let keystrokeTokenRegex = try? NSRegularExpression(
+    pattern: "\\{\\{(tab|enter|return|esc|escape|up|down|left|right|delay:\\d+)\\}\\}",
+    options: [.caseInsensitive]
+  )
+
   /// Extracts interactive Fill-in fields (both `{{input:...}}` and TextExpander `%fill...%` syntax).
   static func extractFillInFields(from item: SnippetItem) -> [SnippetFillInField] {
     guard item.contentMode == .plainText || item.contentMode == .richText || item.contentMode == .html else {
@@ -12,8 +45,7 @@ nonisolated enum SnippetTemplateEngine {
     var seenKeys = Set<String>()
 
     // 1. Optional sections: {{optional:Label}}...{{/optional}} or {{optional:Label=1}}...{{/optional}}
-    let optionalPattern = "\\{\\{optional:([^\\}]+)\\}\\}([\\s\\S]*?)\\{\\{/optional\\}\\}"
-    if let optRegex = try? NSRegularExpression(pattern: optionalPattern) {
+    if let optRegex = optionalSectionRegex {
       let nsRange = NSRange(normalized.startIndex..., in: normalized)
       for match in optRegex.matches(in: normalized, range: nsRange) {
         guard match.numberOfRanges >= 3,
@@ -37,8 +69,7 @@ nonisolated enum SnippetTemplateEngine {
     }
 
     // 2. Inline controls: {{input:...}}, {{textarea:...}}, {{select:Label|Opt1|Opt2}}
-    let inlinePattern = "\\{\\{(input|textarea|select):([^\\}]+)\\}\\}"
-    if let inlineRegex = try? NSRegularExpression(pattern: inlinePattern) {
+    if let inlineRegex = inlineControlRegex {
       let nsRange = NSRange(normalized.startIndex..., in: normalized)
       for match in inlineRegex.matches(in: normalized, range: nsRange) {
         guard match.numberOfRanges >= 3,
@@ -173,10 +204,10 @@ nonisolated enum SnippetTemplateEngine {
     values: [String: String],
     optionalToggles: [String: Bool]
   ) -> String {
+    guard template.contains("{{") else { return template }
     var output = template
 
-    let optionalPattern = "\\{\\{optional:([^\\}]+)\\}\\}([\\s\\S]*?)\\{\\{/optional\\}\\}"
-    if let optRegex = try? NSRegularExpression(pattern: optionalPattern) {
+    if let optRegex = optionalSectionRegex {
       let matches = optRegex.matches(in: output, range: NSRange(output.startIndex..., in: output)).reversed()
       for match in matches {
         guard match.numberOfRanges >= 3,
@@ -193,8 +224,7 @@ nonisolated enum SnippetTemplateEngine {
       }
     }
 
-    let inlinePattern = "\\{\\{(input|textarea|select):([^\\}]+)\\}\\}"
-    if let inlineRegex = try? NSRegularExpression(pattern: inlinePattern) {
+    if let inlineRegex = inlineControlRegex {
       let matches = inlineRegex.matches(in: output, range: NSRange(output.startIndex..., in: output)).reversed()
       for match in matches {
         guard match.numberOfRanges >= 3,
@@ -233,8 +263,7 @@ nonisolated enum SnippetTemplateEngine {
     var result = input
 
     // %fillpart:name=Label:default=yes%...%fillpartend%
-    let partPattern = "%fillpart:(?:name=)?([^:%]+)(?::default=([^%]+))?%([\\s\\S]*?)%fillpartend%"
-    if let regex = try? NSRegularExpression(pattern: partPattern, options: [.caseInsensitive]) {
+    if let regex = legacyFillPartRegex {
       let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
       for match in matches {
         guard let fullRange = Range(match.range(at: 0), in: result),
@@ -250,8 +279,7 @@ nonisolated enum SnippetTemplateEngine {
     }
 
     // %filltext:name=Label:default=Val%
-    let textPattern = "%fill(text|area):(?:name=)?([^:%]+)(?::default=([^:%]*))?(?::width=[0-9]+)?%"
-    if let regex = try? NSRegularExpression(pattern: textPattern, options: [.caseInsensitive]) {
+    if let regex = legacyFillTextRegex {
       let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
       for match in matches {
         guard let fullRange = Range(match.range(at: 0), in: result),
@@ -267,8 +295,7 @@ nonisolated enum SnippetTemplateEngine {
     }
 
     // %fillpopup:name=Label:Opt1:default=Opt2:Opt3%
-    let popupPattern = "%fillpopup:(?:name=)?([^:%]+):([^%]+)%"
-    if let regex = try? NSRegularExpression(pattern: popupPattern, options: [.caseInsensitive]) {
+    if let regex = legacyFillPopupRegex {
       let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
       for match in matches {
         guard let fullRange = Range(match.range(at: 0), in: result),
@@ -294,21 +321,23 @@ nonisolated enum SnippetTemplateEngine {
   // MARK: - Dynamic Date/Time, Business-Day Math, Clipboard & UUID Macros
 
   static func evaluateMacros(in input: String, clipboardString: String, now: Date = Date.now) -> String {
+    guard input.contains("{") || input.contains("%") else { return input }
     var result = input
 
     // Clipboard & UUID
-    result = result
-      .replacingOccurrences(of: "{{clipboard}}", with: clipboardString)
-      .replacingOccurrences(of: "{clipboard}", with: clipboardString)
-      .replacingOccurrences(of: "%clipboard", with: clipboardString)
+    if result.contains("clipboard") {
+      result = result
+        .replacingOccurrences(of: "{{clipboard}}", with: clipboardString)
+        .replacingOccurrences(of: "{clipboard}", with: clipboardString)
+        .replacingOccurrences(of: "%clipboard", with: clipboardString)
+    }
 
     while let range = result.range(of: "{{uuid}}") ?? result.range(of: "{uuid}") {
       result.replaceSubrange(range, with: UUID().uuidString)
     }
 
     // Random integer: {{random:1000-9999}}
-    let randomPattern = "\\{\\{random:([0-9]+)-([0-9]+)\\}\\}"
-    if let randRegex = try? NSRegularExpression(pattern: randomPattern) {
+    if result.contains("{{random:"), let randRegex = randomMacroRegex {
       let matches = randRegex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
       for match in matches {
         guard let fullRange = Range(match.range(at: 0), in: result),
@@ -325,42 +354,44 @@ nonisolated enum SnippetTemplateEngine {
     // Examples:
     //   {{date}}, {{time}}, {{datetime}}, {{isodate}}
     //   {{date +5bd}}, {{date +5bd:dd/MM/yyyy}}, {{date -2d:yyyy-MM-dd}}, {date:dd/MM/yyyy}
-    let dateMacroPattern = "\\{\\{?(date|time|datetime|isodate)(?:\\s*([+-]\\d+\\s*(?:bd|d|w|M|m|y|h)))?(?::([^\\}]+))?\\}?\\}"
-    if let regex = try? NSRegularExpression(pattern: dateMacroPattern) {
+    if result.contains("{") && (result.contains("date") || result.contains("time")),
+       let regex = dateMacroRegex {
       let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
-      for match in matches {
-        guard let fullRange = Range(match.range(at: 0), in: result),
-              let kindRange = Range(match.range(at: 1), in: result) else { continue }
-        let token = String(result[fullRange])
-        // Ensure balanced braces (either `{...}` or `{{...}}`)
-        let startsDouble = token.hasPrefix("{{")
-        let endsDouble = token.hasSuffix("}}")
-        guard startsDouble == endsDouble else { continue }
-
-        let kind = String(result[kindRange]).lowercased()
-        let offsetSpec: String? = match.range(at: 2).location != NSNotFound
-          ? String(result[Range(match.range(at: 2), in: result)!])
-          : nil
-        let customFormat: String? = match.range(at: 3).location != NSNotFound
-          ? String(result[Range(match.range(at: 3), in: result)!])
-          : nil
-
-        let targetDate = applyDateMath(to: now, spec: offsetSpec)
-        let format: String
-        if let customFormat, !customFormat.isEmpty {
-          format = customFormat
-        } else {
-          switch kind {
-          case "time": format = "HH:mm"
-          case "datetime": format = "dd/MM/yyyy HH:mm"
-          case "isodate": format = "yyyy-MM-dd"
-          default: format = "dd/MM/yyyy"
-          }
-        }
+      if !matches.isEmpty {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "vi_VN")
-        formatter.dateFormat = format
-        result.replaceSubrange(fullRange, with: formatter.string(from: targetDate))
+        formatter.locale = vietnameseLocale
+        for match in matches {
+          guard let fullRange = Range(match.range(at: 0), in: result),
+                let kindRange = Range(match.range(at: 1), in: result) else { continue }
+          let token = String(result[fullRange])
+          // Ensure balanced braces (either `{...}` or `{{...}}`)
+          let startsDouble = token.hasPrefix("{{")
+          let endsDouble = token.hasSuffix("}}")
+          guard startsDouble == endsDouble else { continue }
+
+          let kind = String(result[kindRange]).lowercased()
+          let offsetSpec: String? = match.range(at: 2).location != NSNotFound
+            ? String(result[Range(match.range(at: 2), in: result)!])
+            : nil
+          let customFormat: String? = match.range(at: 3).location != NSNotFound
+            ? String(result[Range(match.range(at: 3), in: result)!])
+            : nil
+
+          let targetDate = applyDateMath(to: now, spec: offsetSpec)
+          let format: String
+          if let customFormat, !customFormat.isEmpty {
+            format = customFormat
+          } else {
+            switch kind {
+            case "time": format = "HH:mm"
+            case "datetime": format = "dd/MM/yyyy HH:mm"
+            case "isodate": format = "yyyy-MM-dd"
+            default: format = "dd/MM/yyyy"
+            }
+          }
+          formatter.dateFormat = format
+          result.replaceSubrange(fullRange, with: formatter.string(from: targetDate))
+        }
       }
     }
 
@@ -438,8 +469,7 @@ nonisolated enum SnippetTemplateEngine {
     }
 
     var current = input
-    let pattern = "\\{\\{(shell|applescript|jxa):([\\s\\S]*?)\\}\\}"
-    guard let regex = try? NSRegularExpression(pattern: pattern) else { return current }
+    guard let regex = inlineScriptRegex else { return current }
 
     while let match = regex.firstMatch(in: current, range: NSRange(current.startIndex..., in: current)),
           match.numberOfRanges >= 3,
@@ -537,7 +567,7 @@ nonisolated enum SnippetTemplateEngine {
   static func applyPropagatedCase(from typed: String, to expansion: String) -> String {
     let letters = typed.filter(\.isLetter)
     guard !letters.isEmpty else { return expansion }
-    let locale = Locale(identifier: "vi_VN")
+    let locale = vietnameseLocale
 
     if letters.allSatisfy(\.isUppercase) && letters.count >= 2 {
       return expansion.uppercased(with: locale)
@@ -571,8 +601,7 @@ nonisolated enum SnippetTemplateEngine {
     }
 
     // Split around keystroke/delay tokens: {{tab}}, {{enter}}, {{esc}}, {{up}}, {{down}}, {{left}}, {{right}}, {{delay:200}}
-    let tokenPattern = "\\{\\{(tab|enter|return|esc|escape|up|down|left|right|delay:\\d+)\\}\\}"
-    guard let regex = try? NSRegularExpression(pattern: tokenPattern, options: [.caseInsensitive]) else {
+    guard let regex = keystrokeTokenRegex else {
       return appendSegmentWithCursor(normalized, item: item)
     }
 

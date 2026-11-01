@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Defaults
+import ImageIO
 import Observation
 import Sauce
 import SwiftData
@@ -210,15 +211,24 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     set {
       cachedContentHash = nil
       cachedTotalByteCount = nil
+      cachedNonTransientTypes = nil
+      cachedImagePixelSize = nil
+      didResolveImagePixelSize = false
+      cachedDecodedImage = nil
       _$observationRegistrar.withMutation(of: self, keyPath: \.contents) {
         self.setValue(forKey: \.contents, to: newValue)
       }
     }
   }
 
+  private static let hexDigits: [UInt8] = Array("0123456789abcdef".utf8)
+
   private var cachedDecodedImage: NSImage?
   private var cachedContentHash: String?
   private var cachedTotalByteCount: Int?
+  private var cachedNonTransientTypes: Set<String>?
+  private var cachedImagePixelSize: NSSize?
+  private var didResolveImagePixelSize: Bool = false
 
   init(contents: [HistoryItemContent] = []) {
     let now = Date.now
@@ -241,6 +251,22 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
   func invalidateContentCache() {
     cachedContentHash = nil
     cachedTotalByteCount = nil
+    cachedNonTransientTypes = nil
+    cachedImagePixelSize = nil
+    didResolveImagePixelSize = false
+    cachedDecodedImage = nil
+  }
+
+  var nonTransientTypes: Set<String> {
+    if let cached = cachedNonTransientTypes {
+      return cached
+    }
+    var types = Set<String>()
+    for content in contents where !Self.transientTypes.contains(content.type) {
+      types.insert(content.type)
+    }
+    cachedNonTransientTypes = types
+    return types
   }
 
   /// Fast, bounded SHA-256 fingerprint of non-transient contents.
@@ -277,7 +303,15 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     }
 
     let digest = hasher.finalize()
-    let hashString = digest.map { String(format: "%02x", $0) }.joined()
+    let hashString = String(unsafeUninitializedCapacity: 64) { buffer in
+      var offset = 0
+      for byte in digest {
+        buffer[offset] = Self.hexDigits[Int(byte >> 4)]
+        buffer[offset + 1] = Self.hexDigits[Int(byte & 0x0F)]
+        offset += 2
+      }
+      return 64
+    }
     cachedContentHash = hashString
     return hashString
   }
@@ -292,19 +326,19 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
   }
 
   func supersedes(_ item: HistoryItem) -> Bool {
-    let otherNonTransient = item.contents.filter { !Self.transientTypes.contains($0.type) }
-    guard !otherNonTransient.isEmpty else { return false }
+    let otherTypes = item.nonTransientTypes
+    guard !otherTypes.isEmpty else { return false }
 
-    let myTypes = Set(contents.lazy.filter { !Self.transientTypes.contains($0.type) }.map(\.type))
-    let otherTypes = Set(otherNonTransient.map(\.type))
+    let myTypes = self.nonTransientTypes
     guard myTypes.isSuperset(of: otherTypes) else { return false }
 
     if myTypes == otherTypes {
       return self.contentHash == item.contentHash
     }
 
-    return otherNonTransient.allSatisfy { otherContent in
-      contents.contains { myContent in
+    return item.contents.allSatisfy { otherContent in
+      guard !Self.transientTypes.contains(otherContent.type) else { return true }
+      return contents.contains { myContent in
         guard myContent.type == otherContent.type else { return false }
         guard myContent.value?.count == otherContent.value?.count else { return false }
         return myContent.value == otherContent.value
@@ -415,6 +449,20 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     return NSAttributedString(html: data, documentAttributes: nil)
   }
 
+  var hasImageContent: Bool {
+    if contentData(Self.imageTypes) != nil {
+      return true
+    }
+    if universalClipboardImage, let url = fileURLs.first {
+      return FileManager.default.fileExists(atPath: url.path)
+    }
+    return false
+  }
+
+  var hasPlainTextData: Bool {
+    contentData([.string]) != nil
+  }
+
   var imageData: Data? {
     var data: Data?
     data = contentData(Self.imageTypes)
@@ -423,6 +471,41 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     }
 
     return data
+  }
+
+  /// Reads image pixel dimensions directly from ImageIO headers without decoding full-resolution bitmaps into RAM.
+  var imagePixelSize: NSSize? {
+    if didResolveImagePixelSize {
+      return cachedImagePixelSize
+    }
+    didResolveImagePixelSize = true
+
+    let options = [kCGImageSourceShouldCache: false] as CFDictionary
+    let source: CGImageSource?
+    if let data = contentData(Self.imageTypes) {
+      source = CGImageSourceCreateWithData(data as CFData, options)
+    } else if universalClipboardImage, let url = fileURLs.first {
+      source = CGImageSourceCreateWithURL(url as CFURL, options)
+    } else {
+      source = nil
+    }
+
+    if let source,
+       let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [CFString: Any],
+       let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+       let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+       width > 0, height > 0 {
+      let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+      if (5...8).contains(orientation) {
+        cachedImagePixelSize = NSSize(width: height, height: width)
+      } else {
+        cachedImagePixelSize = NSSize(width: width, height: height)
+      }
+    } else if let decoded = cachedDecodedImage {
+      cachedImagePixelSize = decoded.pixelSize
+    }
+
+    return cachedImagePixelSize
   }
 
   var image: NSImage? {
@@ -495,6 +578,16 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     qos: .utility
   )
 
+  nonisolated private static let preferredRecognitionLanguages: [String] = {
+    let probe = VNRecognizeTextRequest()
+    probe.recognitionLevel = .accurate
+    guard let supported = try? probe.supportedRecognitionLanguages() else { return [] }
+    // Note: Apple Vision uses "vi-VT" for Vietnamese in VNRecognizeTextRequest; match any "vi*" code dynamically!
+    let vietnameseCodes = supported.filter { $0.lowercased().hasPrefix("vi") }
+    let englishCodes = supported.filter { $0 == "en-US" }
+    return vietnameseCodes + englishCodes
+  }()
+
   /// Runs OCR on a dedicated queue so the blocking Vision call never occupies
   /// a thread of Swift's cooperative pool or the main thread.
   nonisolated private static func recognizeText(imageData: Data?, fileURL: URL?) async -> String? {
@@ -514,14 +607,8 @@ nonisolated final class HistoryItem: PersistentModel, Observable, @unchecked Sen
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
-    if let supported = try? request.supportedRecognitionLanguages() {
-      // Note: Apple Vision uses "vi-VT" for Vietnamese in VNRecognizeTextRequest; match any "vi*" code dynamically!
-      let vietnameseCodes = supported.filter { $0.lowercased().hasPrefix("vi") }
-      let englishCodes = supported.filter { $0 == "en-US" }
-      let preferred = vietnameseCodes + englishCodes
-      if !preferred.isEmpty {
-        request.recognitionLanguages = preferred
-      }
+    if !preferredRecognitionLanguages.isEmpty {
+      request.recognitionLanguages = preferredRecognitionLanguages
     }
     request.automaticallyDetectsLanguage = true
 

@@ -9,11 +9,18 @@ class Storage {
   var container: ModelContainer
   var context: ModelContext { container.mainContext }
   var size: String {
-    guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).allValues.first?.value as? Int64, size > 1 else {
+    var totalBytes: Int64 = 0
+    for suffix in ["", "-wal"] {
+      let fileURL = URL(fileURLWithPath: url.path + suffix)
+      if let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+        totalBytes += Int64(fileSize)
+      }
+    }
+    guard totalBytes > 1 else {
       return ""
     }
 
-    return ByteCountFormatter().string(fromByteCount: size)
+    return ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
   }
 
   private let url = URL.applicationSupportDirectory.appending(path: "Maccy/Storage.sqlite")

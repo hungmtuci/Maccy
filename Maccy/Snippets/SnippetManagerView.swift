@@ -651,10 +651,7 @@ struct SnippetStudioView: View {
       .width(min: 140, ideal: 205, max: 320)
 
       TableColumn("Nội dung mở rộng") { snippet in
-        let previewLine = snippet.content
-          .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-          .trimmingCharacters(in: .whitespacesAndNewlines)
-          .shortened(to: 140)
+        let previewLine = store.singleLinePreview(for: snippet)
         Text(previewLine.isEmpty ? "(Trống)" : previewLine)
           .font(.system(size: 12))
           .foregroundStyle(.secondary)

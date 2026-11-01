@@ -96,14 +96,15 @@ class CloudSyncManager {
   var statusMessage: String = ""
   var detectedGoogleDrivePath: String?
 
-  private var fileWatcherSource: DispatchSourceFileSystemObject?
-  private var watcherFileDescriptor: Int32 = -1
-  private var pollTimer: Timer?
-  private var lastObservedFileModificationDate: Date?
-  private var isWritingSyncFile = false
-  private var pendingSyncRequested = false
-  private var localUpdatedAtByHash: [String: Date] = [:]
-  private var metadataByHash: [String: SyncItemMetadata] = [:]
+  @ObservationIgnored private var fileWatcherSource: DispatchSourceFileSystemObject?
+  @ObservationIgnored private var watcherDebounceTask: Task<Void, Never>?
+  @ObservationIgnored private var isCheckingRemoteChanges = false
+  @ObservationIgnored private var pollTimer: Timer?
+  @ObservationIgnored private var lastObservedFileModificationDate: Date?
+  @ObservationIgnored private var isWritingSyncFile = false
+  @ObservationIgnored private var pendingSyncRequested = false
+  @ObservationIgnored private var localUpdatedAtByHash: [String: Date] = [:]
+  @ObservationIgnored private var metadataByHash: [String: SyncItemMetadata] = [:]
 
   func syncMetadata(for hash: String) -> SyncItemMetadata? {
     metadataByHash[hash]
@@ -303,12 +304,8 @@ class CloudSyncManager {
     }
   }
 
-  /// Detects common secret patterns (Private Keys, OpenAI/GitHub/AWS/Google API keys) before cloud sync.
-  private func detectSensitiveSecret(in item: HistoryItem) -> String? {
-    let prefix = item.previewableTextPrefix(maxBytes: 16_384).text
-    guard !prefix.isEmpty else { return nil }
-
-    let patterns: [(name: String, regex: String)] = [
+  private nonisolated static let compiledSecretPatterns: [(name: String, regex: NSRegularExpression)] = {
+    let rawPatterns: [(String, String)] = [
       ("Private Key (SSH/RSA/PEM)", "-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
       ("OpenAI / Anthropic API Key", "\\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}\\b"),
       ("GitHub Token", "\\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\\b"),
@@ -316,9 +313,20 @@ class CloudSyncManager {
       ("Google Cloud / Firebase API Key", "\\bAIza[0-9A-Za-z_-]{35}\\b"),
       ("Slack Token", "\\bxox[baprs]-[0-9A-Za-z-]{15,}\\b")
     ]
+    return rawPatterns.compactMap { name, pattern in
+      guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+      return (name, regex)
+    }
+  }()
 
-    for (name, pattern) in patterns {
-      if prefix.range(of: pattern, options: .regularExpression) != nil {
+  /// Detects common secret patterns (Private Keys, OpenAI/GitHub/AWS/Google API keys) before cloud sync.
+  private func detectSensitiveSecret(in item: HistoryItem) -> String? {
+    let prefix = item.previewableTextPrefix(maxBytes: 16_384).text
+    guard !prefix.isEmpty else { return nil }
+    let range = NSRange(prefix.startIndex..., in: prefix)
+
+    for (name, regex) in Self.compiledSecretPatterns {
+      if regex.firstMatch(in: prefix, range: range) != nil {
         return name
       }
     }
@@ -412,18 +420,23 @@ class CloudSyncManager {
     let encryptionKey = currentEncryptionKey
 
     // Phase 1 (Background): Create directories, read primary JSON + merge any Google Drive conflict copies
-    let loadResult: Result<(database: SyncDatabasePayload, conflictURLs: [URL]), Error> = await Task.detached(priority: .utility) {
+    let loadResult: Result<(database: SyncDatabasePayload, conflictURLs: [URL], primaryModDate: Date?), Error> = await Task.detached(priority: .utility) {
       try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
       try FileManager.default.createDirectory(at: blobsURL, withIntermediateDirectories: true)
-      return Self.loadAndMergeDatabases(primaryURL: fileURL, folderURL: folderURL)
+      let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+      let modDate = attrs?[.modificationDate] as? Date
+      let merged = Self.loadAndMergeDatabases(primaryURL: fileURL, folderURL: folderURL)
+      return (merged.database, merged.conflictURLs, modDate)
     }.result
 
     var database: SyncDatabasePayload
     let conflictURLsToClean: [URL]
+    let existingPrimaryModDate: Date?
     switch loadResult {
     case .success(let loaded):
       database = loaded.database
       conflictURLsToClean = loaded.conflictURLs
+      existingPrimaryModDate = loaded.primaryModDate
     case .failure(let error):
       lastSyncError = "Không thể truy cập thư mục đồng bộ: \(error.localizedDescription)"
       return
@@ -432,6 +445,7 @@ class CloudSyncManager {
     var hashes = Defaults[.syncedItemHashes]
     let allLocalDecorators = AppState.shared.history.allDecorators
     var localByHash: [String: HistoryItemDecorator] = [:]
+    localByHash.reserveCapacity(allLocalDecorators.count)
     for decorator in allLocalDecorators {
       localByHash[decorator.item.contentHash] = decorator
     }
@@ -450,6 +464,7 @@ class CloudSyncManager {
     }
 
     var localHistoryChanged = false
+    var databaseMutatedLocally = false
     var remoteItemsToDecode: [SyncedClipboardItem] = []
 
     // Phase 2 (@MainActor): Reconcile metadata & identify remote items to import
@@ -480,6 +495,7 @@ class CloudSyncManager {
             tombstone.updatedAt = localStamp
             tombstone.contents = []
             database.items[syncId] = tombstone
+            databaseMutatedLocally = true
             metadataByHash.removeValue(forKey: syncId)
             continue
           } else {
@@ -511,6 +527,7 @@ class CloudSyncManager {
           tombstone.updatedAt = localStamp
           tombstone.contents = []
           database.items[syncId] = tombstone
+          databaseMutatedLocally = true
           metadataByHash.removeValue(forKey: syncId)
           continue
         }
@@ -582,6 +599,7 @@ class CloudSyncManager {
         remote.updatedAt = localStamp
         remote.contents = []
         database.items[syncId] = remote
+        databaseMutatedLocally = true
         metadataByHash.removeValue(forKey: syncId)
       }
     }
@@ -591,6 +609,30 @@ class CloudSyncManager {
     if localHistoryChanged {
       try? Storage.shared.context.save()
       AppState.shared.history.refreshSyncFilter()
+    }
+
+    let tombstoneCutoff = Date.now.addingTimeInterval(-30 * 86_400)
+    let hasExpiredTombstones = database.items.values.contains { $0.isDeleted && $0.updatedAt < tombstoneCutoff }
+    let needsRemoteWrite = (existingPrimaryModDate == nil)
+      || !conflictURLsToClean.isEmpty
+      || !pushCandidates.isEmpty
+      || databaseMutatedLocally
+      || hasExpiredTombstones
+
+    // Skip Phase 4 disk write completely if Google Drive JSON is already 100% up-to-date
+    if !needsRemoteWrite {
+      if let existingPrimaryModDate {
+        lastObservedFileModificationDate = existingPrimaryModDate
+      }
+      let now = Date.now
+      lastSyncDate = now
+      Defaults[.lastCloudSyncAt] = now
+      if lastSyncError?.contains("Mật khẩu mã hoá") != true {
+        lastSyncError = nil
+      }
+      statusMessage = "Đã đồng bộ \(hashes.count) mục"
+      await SnippetStore.shared.syncWithGoogleDrive()
+      return
     }
 
     // Phase 4 (Background): LZFSE compress, AES-256-GCM encrypt, write blobs, write JSON, clean conflicts & orphan blobs
@@ -636,7 +678,6 @@ class CloudSyncManager {
       }
 
       // Prune tombstones older than 30 days to keep JSON compact permanently
-      let tombstoneCutoff = Date.now.addingTimeInterval(-30 * 86_400)
       updatedDB.items = updatedDB.items.filter { _, item in
         !item.isDeleted || item.updatedAt >= tombstoneCutoff
       }
@@ -969,53 +1010,105 @@ class CloudSyncManager {
 
   private func startPollingTimer() {
     pollTimer?.invalidate()
-    pollTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+    let timer = Timer(timeInterval: 15.0, repeats: true) { [weak self] _ in
       Task { @MainActor in
         self?.checkRemoteFileChangesIfNeeded()
       }
     }
+    timer.tolerance = 4.0
+    RunLoop.main.add(timer, forMode: .common)
+    pollTimer = timer
+  }
+
+  private func scheduleDebouncedRemoteCheck() {
+    watcherDebounceTask?.cancel()
+    watcherDebounceTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .milliseconds(350))
+      guard !Task.isCancelled else { return }
+      self?.checkRemoteFileChangesIfNeeded()
+    }
   }
 
   private func checkRemoteFileChangesIfNeeded() {
-    guard isEnabled, !isWritingSyncFile, !isSyncing, let fileURL = syncFileURL else { return }
+    guard isEnabled,
+          !isWritingSyncFile,
+          !isSyncing,
+          !SnippetStore.shared.isSyncingSnippets,
+          !isCheckingRemoteChanges,
+          let fileURL = syncFileURL else {
+      return
+    }
+
+    isCheckingRemoteChanges = true
     let folderURL = fileURL.deletingLastPathComponent()
+    let snippetsURL = folderURL.appendingPathComponent(SnippetStore.cloudFileName, isDirectory: false)
+    let knownClipboardMod = lastObservedFileModificationDate
+    let knownSnippetsMod = SnippetStore.shared.lastObservedCloudModificationDate
 
-    // Trigger sync immediately if Google Drive Desktop created a conflict file (e.g. "maccy-synced-items (1).json")
-    if !Self.findConflictDatabaseURLs(in: folderURL).isEmpty {
-      Task {
-        await syncNow()
-      }
-      return
-    }
+    Task { @MainActor in
+      defer { self.isCheckingRemoteChanges = false }
 
-    guard FileManager.default.fileExists(atPath: fileURL.path),
-          let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
-          let modDate = attrs[.modificationDate] as? Date else {
-      return
-    }
-
-    if let lastObserved = lastObservedFileModificationDate {
-      if modDate > lastObserved.addingTimeInterval(0.5) {
-        lastObservedFileModificationDate = modDate
-        Task {
-          await syncNow()
+      // Perform CloudStorage directory/file stat off the main thread so FileProvider mounts never stall UI
+      let probe = await Task.detached(priority: .utility) { () -> (clipboardChanged: Bool, snippetsChanged: Bool, clipMod: Date?) in
+        var hasClipboardConflict = false
+        var hasSnippetConflict = false
+        if let urls = try? FileManager.default.contentsOfDirectory(
+          at: folderURL,
+          includingPropertiesForKeys: nil,
+          options: [.skipsHiddenFiles]
+        ) {
+          for url in urls where url.pathExtension.lowercased() == "json" {
+            let name = url.lastPathComponent
+            let lower = name.lowercased()
+            if name != Self.syncFileName && lower.hasPrefix("maccy-synced-items") {
+              hasClipboardConflict = true
+            } else if name != SnippetStore.cloudFileName && lower.hasPrefix("maccy-snippets") {
+              hasSnippetConflict = true
+            }
+          }
         }
-      }
-    } else {
-      lastObservedFileModificationDate = modDate
-      Task {
-        await syncNow()
+
+        let clipMod = (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
+        let snipMod = (try? FileManager.default.attributesOfItem(atPath: snippetsURL.path))?[.modificationDate] as? Date
+
+        var clipboardChanged = hasClipboardConflict
+        if !clipboardChanged, let clipMod {
+          if let last = knownClipboardMod {
+            clipboardChanged = clipMod > last.addingTimeInterval(0.5)
+          } else {
+            clipboardChanged = true
+          }
+        }
+
+        var snippetsChanged = hasSnippetConflict
+        if !snippetsChanged, let snipMod {
+          if let last = knownSnippetsMod {
+            snippetsChanged = snipMod > last.addingTimeInterval(0.5)
+          } else {
+            snippetsChanged = true
+          }
+        }
+
+        return (clipboardChanged, snippetsChanged, clipMod)
+      }.value
+
+      if probe.clipboardChanged {
+        if let mod = probe.clipMod {
+          self.lastObservedFileModificationDate = mod
+        }
+        await self.syncNow()
+      } else if probe.snippetsChanged {
+        await SnippetStore.shared.syncWithGoogleDrive()
       }
     }
   }
 
   func setupFileWatcher() {
+    watcherDebounceTask?.cancel()
+    watcherDebounceTask = nil
+    // Cancelling the source triggers `setCancelHandler`, which is the sole owner of `close(fd)`
     fileWatcherSource?.cancel()
     fileWatcherSource = nil
-    if watcherFileDescriptor >= 0 {
-      close(watcherFileDescriptor)
-      watcherFileDescriptor = -1
-    }
 
     guard isEnabled, let fileURL = syncFileURL else { return }
     let folderURL = fileURL.deletingLastPathComponent()
@@ -1023,7 +1116,6 @@ class CloudSyncManager {
 
     let fd = open(folderURL.path, O_EVTONLY)
     guard fd >= 0 else { return }
-    watcherFileDescriptor = fd
 
     let source = DispatchSource.makeFileSystemObjectSource(
       fileDescriptor: fd,
@@ -1031,8 +1123,8 @@ class CloudSyncManager {
       queue: .main
     )
     source.setEventHandler { [weak self] in
-      Task { @MainActor in
-        self?.checkRemoteFileChangesIfNeeded()
+      MainActor.assumeIsolated {
+        self?.scheduleDebouncedRemoteCheck()
       }
     }
     source.setCancelHandler {

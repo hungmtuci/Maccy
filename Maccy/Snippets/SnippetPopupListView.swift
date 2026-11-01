@@ -253,10 +253,7 @@ private struct SnippetPopupRowView: View {
   }
 
   private var singleLineBodyPreview: String {
-    item.content
-      .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-      .shortened(to: 110)
+    SnippetStore.shared.singleLinePreview(for: item).shortened(to: 110)
   }
 
   var body: some View {

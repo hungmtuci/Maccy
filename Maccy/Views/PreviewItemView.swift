@@ -119,10 +119,10 @@ struct PreviewItemView: View {
         }
       }
 
-      if item.hasImage, let image = item.item.image {
+      if item.hasImage, let pixelSize = item.item.imagePixelSize {
         HStack(spacing: 3) {
           Text("Dimensions", tableName: "PreviewItemView")
-          Text("\(Int(image.pixelSize.width))×\(Int(image.pixelSize.height))")
+          Text("\(Int(pixelSize.width))×\(Int(pixelSize.height))")
         }
       }
 

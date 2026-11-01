@@ -12,9 +12,10 @@ export COPYFILE_DISABLE=1
 
 APP_NAME="Maccy"
 BUNDLE_ID="org.p0deje.Maccy"
-VERSION="3.1.0-custom"
+VERSION="3.1.1-custom"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 WORKSPACE_APP_BUNDLE="$(dirname "$PROJECT_DIR")/$APP_NAME.app"
+SPM_SCRATCH_DIR="/tmp/maccy_spm_build"
 
 STAGE_DIR="/tmp/maccy_stage_$$"
 STAGE_APP="$STAGE_DIR/$APP_NAME.app"
@@ -23,12 +24,17 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
 echo "==> [1/5] Đang biên dịch $APP_NAME Universal (arm64 + x86_64, SwiftBuild Release)..."
+rm -rf "$PROJECT_DIR/Maccy 2.app" "$(dirname "$PROJECT_DIR")/Maccy 2.app" 2>/dev/null || true
 find "$PROJECT_DIR" -not -path '*/.git/*' -not -path '*/.build/*' -name '* 2*' -delete 2>/dev/null || true
 
-# IMPORTANT: Never pass `--build-system native`! The legacy build system hardcodes local `.build` paths
-# into `Bundle.module` (`resource_bundle_accessor.swift`) instead of checking `Bundle.main.resourceURL`,
-# which causes an immediate fatalError crash when launching the `.app` on any other Mac!
+# IMPORTANT:
+# 1. Never pass `--build-system native`! The legacy build system hardcodes local `.build` paths
+#    into `Bundle.module` (`resource_bundle_accessor.swift`) instead of checking `Bundle.main.resourceURL`,
+#    which causes an immediate fatalError crash when launching the `.app` on any other Mac!
+# 2. Build in `/tmp/maccy_spm_build` outside `~/Documents` so iCloud/Finder never attaches `FinderInfo`
+#    extended attributes to intermediate `.bundle` targets before SwiftBuild signs them.
 SWIFTC_COMPAT_FLAGS=(
+  --scratch-path "$SPM_SCRATCH_DIR"
   -Xswiftc -runtime-compatibility-version -Xswiftc none
   -Xswiftc -disable-autolinking-runtime-compatibility
   -Xswiftc -disable-autolinking-runtime-compatibility-concurrency
@@ -39,8 +45,8 @@ if swift build -c release --arch arm64 --arch x86_64 --product "$APP_NAME" "${SW
   BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --product "$APP_NAME" "${SWIFTC_COMPAT_FLAGS[@]}" --show-bin-path)"
 else
   echo "    (Fallback biên dịch kiến trúc gốc arm64...)"
-  swift build -c release --product "$APP_NAME"
-  BIN_DIR="$(swift build -c release --product "$APP_NAME" --show-bin-path)"
+  swift build -c release --scratch-path "$SPM_SCRATCH_DIR" --product "$APP_NAME"
+  BIN_DIR="$(swift build -c release --scratch-path "$SPM_SCRATCH_DIR" --product "$APP_NAME" --show-bin-path)"
 fi
 BIN_PATH="$BIN_DIR/$APP_NAME"
 
@@ -126,7 +132,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 	<key>CFBundleShortVersionString</key>
 	<string>${VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>310</string>
+	<string>311</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © Alexey Rodionov • Custom Edition by Hung Le Xuan</string>
 	<key>NSAppleEventsUsageDescription</key>

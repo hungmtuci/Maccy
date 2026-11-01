@@ -16,6 +16,31 @@ class Clipboard {
   private let pasteboard = NSPasteboard.general
 
   private var timer: Timer?
+  private var cachedIgnorePatterns: [String] = []
+  private var cachedIgnoreRegexes: [NSRegularExpression] = []
+
+  private nonisolated static let exactTrackingKeys: Set<String> = [
+    "fbclid", "gclid", "dclid", "msclkid", "igshid", "mc_cid", "mc_eid", "yclid", "_hsenc", "_hsmi"
+  ]
+  private nonisolated static let htmlCommentRegex = try? NSRegularExpression(
+    pattern: "<!--.*?-->",
+    options: [.caseInsensitive, .dotMatchesLineSeparators]
+  )
+  private nonisolated static let htmlMetaTagRegex = try? NSRegularExpression(
+    pattern: "<meta[^>]*>",
+    options: [.caseInsensitive, .dotMatchesLineSeparators]
+  )
+  private nonisolated static let singleAnchorHrefRegex = try? NSRegularExpression(
+    pattern: "^<a\\b[^>]*\\bhref\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>.*?</a>$",
+    options: [.caseInsensitive, .dotMatchesLineSeparators]
+  )
+  private nonisolated static let firstHrefRegex = try? NSRegularExpression(
+    pattern: "\\bhref\\s*=\\s*[\"'](https?://[^\"'\\s>]+)[\"']",
+    options: [.caseInsensitive, .dotMatchesLineSeparators]
+  )
+  private nonisolated static let rawHTTPURLRegex = try? NSRegularExpression(
+    pattern: "https?://[^\\s\"'<>\\0]+"
+  )
 
   private let dynamicTypePrefix = "dyn."
   private let microsoftSourcePrefix = "com.microsoft.ole.source."
@@ -59,13 +84,16 @@ class Clipboard {
   }
 
   func start() {
-    timer = Timer.scheduledTimer(
-      timeInterval: Defaults[.clipboardCheckInterval],
+    let interval = Defaults[.clipboardCheckInterval]
+    let newTimer = Timer.scheduledTimer(
+      timeInterval: interval,
       target: self,
       selector: #selector(checkForChangesInPasteboard),
       userInfo: nil,
       repeats: true
     )
+    newTimer.tolerance = min(max(interval * 0.2, 0.05), 0.25)
+    timer = newTimer
   }
 
   func restart() {
@@ -628,22 +656,22 @@ class Clipboard {
   }
 
   private func shouldIgnore(_ item: NSPasteboardItem) -> Bool {
-    guard !Defaults[.ignoreRegexp].isEmpty else { return false }
+    let patterns = Defaults[.ignoreRegexp]
+    guard !patterns.isEmpty else { return false }
     guard let data = item.data(forType: .string),
           let sample = data.utf8PrefixString(maxBytes: 16_384),
           !sample.isEmpty else {
       return false
     }
 
-    for regexp in Defaults[.ignoreRegexp] {
-      do {
-        let regex = try NSRegularExpression(pattern: regexp)
-        if regex.numberOfMatches(in: sample, range: NSRange(sample.startIndex..., in: sample)) > 0 {
-          return true
-        }
-      } catch {
-        return false
-      }
+    if patterns != cachedIgnorePatterns {
+      cachedIgnorePatterns = patterns
+      cachedIgnoreRegexes = patterns.compactMap { try? NSRegularExpression(pattern: $0) }
+    }
+
+    let nsRange = NSRange(sample.startIndex..., in: sample)
+    for regex in cachedIgnoreRegexes where regex.firstMatch(in: sample, range: nsRange) != nil {
+      return true
     }
     return false
   }
@@ -806,9 +834,6 @@ class Clipboard {
       return url
     }
 
-    let exactTrackingKeys: Set<String> = [
-      "fbclid", "gclid", "dclid", "msclkid", "igshid", "mc_cid", "mc_eid", "yclid", "_hsenc", "_hsmi"
-    ]
     let filtered = items.filter { item in
       let key = item.name.lowercased()
       if key.hasPrefix("utm_") { return false }
@@ -853,13 +878,24 @@ class Clipboard {
       return nil
     }
     // Strip optional <meta ...> or <!--StartFragment--> wrappers emitted by Chromium/Edge
-    let stripped = html
-      .replacingOccurrences(of: "(?is)<!--.*?-->", with: "", options: .regularExpression)
-      .replacingOccurrences(of: "(?is)<meta[^>]*>", with: "", options: .regularExpression)
-      .trimmingCharacters(in: .whitespacesAndNewlines)
+    var stripped = html
+    if let commentRegex = htmlCommentRegex {
+      stripped = commentRegex.stringByReplacingMatches(
+        in: stripped,
+        range: NSRange(stripped.startIndex..., in: stripped),
+        withTemplate: ""
+      )
+    }
+    if let metaRegex = htmlMetaTagRegex {
+      stripped = metaRegex.stringByReplacingMatches(
+        in: stripped,
+        range: NSRange(stripped.startIndex..., in: stripped),
+        withTemplate: ""
+      )
+    }
+    stripped = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
 
-    let pattern = "^(?is)<a\\b[^>]*\\bhref\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>.*?</a>$"
-    guard let regex = try? NSRegularExpression(pattern: pattern),
+    guard let regex = singleAnchorHrefRegex,
           let match = regex.firstMatch(in: stripped, range: NSRange(stripped.startIndex..., in: stripped)),
           match.numberOfRanges > 1,
           let hrefRange = Range(match.range(at: 1), in: stripped) else {
@@ -870,16 +906,15 @@ class Clipboard {
 
   private nonisolated static func extractFirstHref(from data: Data) -> String? {
     guard let text = data.utf8PrefixString(maxBytes: 16_384), !text.isEmpty else { return nil }
-    let pattern = "(?is)\\bhref\\s*=\\s*[\"'](https?://[^\"'\\s>]+)[\"']"
-    if let regex = try? NSRegularExpression(pattern: pattern),
-       let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+    let fullRange = NSRange(text.startIndex..., in: text)
+    if let regex = firstHrefRegex,
+       let match = regex.firstMatch(in: text, range: fullRange),
        match.numberOfRanges > 1,
        let hrefRange = Range(match.range(at: 1), in: text) {
       return unescapeHTMLAttribute(String(text[hrefRange]))
     }
-    let urlPattern = "https?://[^\\s\"'<>\\0]+"
-    if let regex = try? NSRegularExpression(pattern: urlPattern),
-       let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+    if let regex = rawHTTPURLRegex,
+       let match = regex.firstMatch(in: text, range: fullRange),
        let urlRange = Range(match.range(at: 0), in: text) {
       return unescapeHTMLAttribute(String(text[urlRange]))
     }

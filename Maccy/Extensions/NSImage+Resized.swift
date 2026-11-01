@@ -4,7 +4,7 @@ import AppKit.NSImage
 extension NSImage {
   /// Returns the pixel dimensions of the image.
   /// On Retina displays, this differs from `size` which returns logical points.
-  var pixelSize: NSSize {
+  nonisolated var pixelSize: NSSize {
     if let bitmapRep = representations.first(where: { $0 is NSBitmapImageRep }) as? NSBitmapImageRep {
       return NSSize(width: CGFloat(bitmapRep.pixelsWide), height: CGFloat(bitmapRep.pixelsHigh))
     }
@@ -12,6 +12,9 @@ extension NSImage {
     return size
   }
   func resized(to newSize: NSSize) -> NSImage {
+    guard size.width > 0, size.height > 0 else {
+      return self
+    }
     let ratioX = newSize.width / size.width
     let ratioY = newSize.height / size.height
     let ratio = ratioX < ratioY ? ratioX : ratioY

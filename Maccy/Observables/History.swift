@@ -178,10 +178,22 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   private func limitHistorySize(to maxSize: Int) {
     // Never auto-evict synced items when trimming history size
+    let safeMax = max(maxSize, 0)
     let unpinnedCandidates = allUnpinnedItems.filter { !$0.isSynced }
-    if unpinnedCandidates.count > maxSize {
-      unpinnedCandidates[maxSize...].forEach(delete)
+    guard unpinnedCandidates.count > safeMax else { return }
+
+    let itemsToEvict = Array(unpinnedCandidates[safeMax...])
+    let evictedSet = Set(itemsToEvict)
+    for evicted in itemsToEvict {
+      CloudSyncManager.shared.handleItemDeleted(evicted.item)
+      cleanup(evicted)
+      deleteFromStorage(evicted.item)
+      sessionLog.removeValues { $0 == evicted.item }
     }
+    allUnpinnedItems.removeAll { evictedSet.contains($0) }
+    filteredUnpinnedItems.removeAll { evictedSet.contains($0) }
+    Storage.shared.context.processPendingChanges()
+    try? Storage.shared.context.save()
   }
 
   @MainActor
@@ -312,9 +324,13 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return "HistoryItem=\(historyItemCount ?? 0) HistoryItemContent=\(historyContentCount ?? 0)"
     }
 
-    logger.info("\(msg) Before: \(dataCounts())")
-    try? block()
-    logger.info("\(msg) After: \(dataCounts())")
+    if logger.logLevel <= .debug {
+      logger.debug("\(msg) Before: \(dataCounts())")
+      try? block()
+      logger.debug("\(msg) After: \(dataCounts())")
+    } else {
+      try? block()
+    }
   }
 
   @MainActor
@@ -640,8 +656,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   }
 
   private func insertUnpinned(_ item: HistoryItemDecorator) {
-    let sortedItems = sorter.sort(allUnpinnedItems.map(\.item) + [item.item])
-    guard let index = sortedItems.firstIndex(of: item.item) else { return }
+    let index = sorter.insertionIndex(for: item.item, in: allUnpinnedItems)
     allUnpinnedItems.insert(item, at: index)
   }
 
@@ -657,7 +672,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func updateTitlesForSpecialSymbols() {
-    for item in items where item.item.imageData == nil {
+    for item in items where !item.hasImage {
       updateTitle(item: item, title: item.item.generateTitle())
     }
   }
@@ -669,15 +684,27 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   }
 
   private func updateUnpinnedShortcuts() {
-    let shortcutItems = unpinnedItems.filter(\.isVisible)
-    for item in shortcutItems {
-      item.shortcuts = []
-    }
-
-    var index = 1
-    for item in shortcutItems.prefix(9) {
-      item.shortcuts = KeyShortcut.create(character: String(index))
-      index += 1
+    var visibleRank = 0
+    for item in unpinnedItems {
+      guard item.isVisible else {
+        if !item.shortcuts.isEmpty {
+          item.shortcuts = []
+        }
+        continue
+      }
+      visibleRank += 1
+      if visibleRank <= 9 {
+        let newShortcuts = KeyShortcut.create(character: String(visibleRank))
+        let unchanged = item.shortcuts.count == newShortcuts.count
+          && zip(item.shortcuts, newShortcuts).allSatisfy {
+            $0.key == $1.key && $0.modifierFlags == $1.modifierFlags
+          }
+        if !unchanged {
+          item.shortcuts = newShortcuts
+        }
+      } else if !item.shortcuts.isEmpty {
+        item.shortcuts = []
+      }
     }
   }
 }

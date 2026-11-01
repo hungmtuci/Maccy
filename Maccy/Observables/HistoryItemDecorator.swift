@@ -36,18 +36,16 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
       return "iCloud"
     }
 
-    guard let bundle = item.application,
-      let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
-    else {
+    guard let bundle = item.application else {
       return nil
     }
 
-    return url.deletingPathExtension().lastPathComponent
+    return ApplicationImageCache.shared.getApplicationName(bundleIdentifier: bundle)
   }
 
-  var hasImage: Bool { item.imageData != nil }
+  var hasImage: Bool { item.hasImageContent }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
-  var hasPlainText: Bool { item.text != nil }
+  var hasPlainText: Bool { item.hasPlainTextData }
   var hasRichText: Bool { item.rtfData != nil || item.htmlData != nil }
 
   var previewImageGenerationTask: Task<(), Error>?
@@ -166,8 +164,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   // Describe the complete item independently of its potentially truncated visual content.
   var accessibilityLabel: String {
     var parts: [String] = []
-    if hasImage, let image = item.image {
-      let size = image.pixelSize
+    if hasImage, let size = item.imagePixelSize {
       parts.append(
         String(
           format: NSLocalizedString("history_item_image_accessibility_label_no_app", comment: ""),

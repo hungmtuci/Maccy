@@ -57,40 +57,41 @@ class Search {
   private func fuzzySearch(string: String, within: [Searchable]) -> [SearchResult] {
     let pattern = fuse.createPattern(from: string)
     let foldedQuery = string.foldingVietnameseDiacritics
+    let foldedTokens = foldedQuery.split(whereSeparator: \.isWhitespace).map(String.init)
     let foldedPattern = foldedQuery != string ? fuse.createPattern(from: foldedQuery) : pattern
     let searchResults: [SearchResult] = within.compactMap { item in
       fuzzySearch(
         for: pattern,
         foldedPattern: foldedPattern,
-        rawQuery: string,
+        foldedQuery: foldedQuery,
+        foldedTokens: foldedTokens,
         in: item.title,
         foldedSearchString: item.foldedTitle,
         of: item
       )
     }
-    let sortedResults = searchResults.sorted(by: { ($0.score ?? 0) < ($1.score ?? 0) })
-    return sortedResults
+    return searchResults.sorted(by: { ($0.score ?? 0) < ($1.score ?? 0) })
   }
 
   private func fuzzySearch(
     for pattern: Fuse.Pattern?,
     foldedPattern: Fuse.Pattern?,
-    rawQuery: String,
+    foldedQuery: String,
+    foldedTokens: [String],
     in searchString: String,
     foldedSearchString: String,
     of item: Searchable
   ) -> SearchResult? {
     var searchString = searchString
     if searchString.count > fuzzySearchLimit {
-      // shortcut to avoid slow search
       let stopIndex = searchString.index(searchString.startIndex, offsetBy: fuzzySearchLimit)
-      searchString = "\(searchString[...stopIndex])"
+      searchString = String(searchString[...stopIndex])
     }
 
     var foldedTarget = foldedSearchString
     if foldedTarget.count > fuzzySearchLimit {
       let stopIndex = foldedTarget.index(foldedTarget.startIndex, offsetBy: fuzzySearchLimit)
-      foldedTarget = "\(foldedTarget[...stopIndex])"
+      foldedTarget = String(foldedTarget[...stopIndex])
     }
 
     let directMatch = fuse.search(pattern, in: searchString)
@@ -116,7 +117,7 @@ class Search {
 
     // Deep 64 KB body fallback for long items in Fuzzy mode (ranked below title matches)
     if item.item.totalByteCount > searchString.utf8.count,
-       bodyMatches(query: rawQuery, in: item, options: .caseInsensitive) {
+       bodyMatches(foldedQuery: foldedQuery, foldedTokens: foldedTokens, in: item, options: .caseInsensitive) {
       return SearchResult(score: 0.68, object: item, ranges: [], matchedInBody: true)
     }
 
@@ -128,11 +129,39 @@ class Search {
     within: [Searchable],
     options: NSString.CompareOptions
   ) -> [SearchResult] {
-    return within.compactMap { simpleSearch(for: string, in: $0.title, of: $0, options: options) }
+    // Validate regex once upfront instead of failing N times per item
+    if options.contains(.regularExpression),
+       (try? NSRegularExpression(pattern: string)) == nil {
+      return []
+    }
+
+    let foldedQuery = string.foldingVietnameseDiacritics
+    let rawTokens = options.contains(.regularExpression)
+      ? []
+      : string.split(whereSeparator: \.isWhitespace).map(String.init)
+    let tokenPairs: [(raw: String, folded: String)] = rawTokens.count >= 2
+      ? rawTokens.map { ($0, $0.foldingVietnameseDiacritics) }
+      : []
+    let foldedTokens = tokenPairs.map(\.folded)
+
+    return within.compactMap {
+      simpleSearch(
+        for: string,
+        foldedQuery: foldedQuery,
+        tokenPairs: tokenPairs,
+        foldedTokens: foldedTokens,
+        in: $0.title,
+        of: $0,
+        options: options
+      )
+    }
   }
 
   private func simpleSearch(
     for string: String,
+    foldedQuery: String,
+    tokenPairs: [(raw: String, folded: String)],
+    foldedTokens: [String],
     in searchString: String,
     of item: Searchable,
     options: NSString.CompareOptions
@@ -140,23 +169,25 @@ class Search {
     if let range = searchString.rangeByVietnameseSearch(
       of: string,
       options: options,
-      precomputedFoldedSelf: item.foldedTitle
+      precomputedFoldedSelf: item.foldedTitle,
+      precomputedFoldedQuery: foldedQuery
     ) {
       return SearchResult(object: item, ranges: [range])
     }
 
     // Multi-word non-contiguous token search in title (e.g. "implant khoa 41" -> "Cấy ghép Implant ... Khóa 41")
-    if !options.contains(.regularExpression),
+    if tokenPairs.count >= 2,
        let tokenRanges = searchString.multiWordRangesByVietnameseSearch(
          of: string,
-         precomputedFoldedSelf: item.foldedTitle
+         precomputedFoldedSelf: item.foldedTitle,
+         precomputedTokens: tokenPairs
        ) {
       return SearchResult(object: item, ranges: tokenRanges)
     }
 
     // Deep full-text search fallback for large items (> title length, up to 64 KB) without blocking UI
     if item.item.totalByteCount > searchString.utf8.count,
-       bodyMatches(query: string, in: item, options: options) {
+       bodyMatches(foldedQuery: foldedQuery, foldedTokens: foldedTokens, in: item, options: options) {
       return SearchResult(object: item, ranges: [], matchedInBody: true)
     }
 
@@ -164,11 +195,11 @@ class Search {
   }
 
   private func bodyMatches(
-    query: String,
+    foldedQuery: String,
+    foldedTokens: [String],
     in item: Searchable,
     options: NSString.CompareOptions
   ) -> Bool {
-    let foldedQuery = query.foldingVietnameseDiacritics
     guard !foldedQuery.isEmpty else { return false }
 
     let body = item.foldedSearchableBodyText
@@ -178,12 +209,9 @@ class Search {
       return true
     }
 
-    if !options.contains(.regularExpression) {
-      let tokens = foldedQuery.split(whereSeparator: \.isWhitespace)
-      if tokens.count >= 2 {
-        return tokens.allSatisfy { token in
-          body.range(of: String(token), options: .caseInsensitive) != nil
-        }
+    if !options.contains(.regularExpression), foldedTokens.count >= 2 {
+      return foldedTokens.allSatisfy { token in
+        body.range(of: token, options: .caseInsensitive) != nil
       }
     }
 

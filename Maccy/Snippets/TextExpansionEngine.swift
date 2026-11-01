@@ -33,11 +33,18 @@ final class TextExpansionEngine {
     }
   }
 
+  @ObservationIgnored private let myPID: pid_t = ProcessInfo.processInfo.processIdentifier
   @ObservationIgnored private var eventTap: CFMachPort?
   @ObservationIgnored private var runLoopSource: CFRunLoopSource?
   @ObservationIgnored private var healthTimer: Timer?
+  @ObservationIgnored private var currentHealthInterval: TimeInterval = 0
   @ObservationIgnored private var appSwitchObserver: NSObjectProtocol?
   @ObservationIgnored private var defaultsTask: Task<Void, Never>?
+  @ObservationIgnored private var ignoredAppsTask: Task<Void, Never>?
+
+  @ObservationIgnored private var cachedTargetPID: pid_t = -1
+  @ObservationIgnored private var cachedTargetApp: NSRunningApplication?
+  @ObservationIgnored private var cachedTargetIsIgnored: Bool = false
 
   @ObservationIgnored private var typingBuffer: String = ""
   @ObservationIgnored private var isExpanding: Bool = false
@@ -73,26 +80,13 @@ final class TextExpansionEngine {
       ) { [weak self] _ in
         MainActor.assumeIsolated {
           self?.typingBuffer = ""
+          self?.invalidateTargetAppCache()
           self?.refreshStatusAndEnsureEventTap()
         }
       }
     }
 
-    if healthTimer == nil {
-      let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
-        if Thread.isMainThread {
-          MainActor.assumeIsolated {
-            self?.refreshStatusAndEnsureEventTap()
-          }
-        } else {
-          DispatchQueue.main.async { [weak self] in
-            self?.refreshStatusAndEnsureEventTap()
-          }
-        }
-      }
-      RunLoop.main.add(timer, forMode: .common)
-      healthTimer = timer
-    }
+    updateAdaptiveHealthTimer()
 
     if defaultsTask == nil {
       defaultsTask = Task { @MainActor [weak self] in
@@ -108,6 +102,16 @@ final class TextExpansionEngine {
             self.tearDownEventTap()
             self.refreshPermissionFlags()
           }
+          self.updateAdaptiveHealthTimer()
+        }
+      }
+    }
+
+    if ignoredAppsTask == nil {
+      ignoredAppsTask = Task { @MainActor [weak self] in
+        for await _ in Defaults.updates([.ignoredApps, .ignoreAllAppsExceptListed], initial: false) {
+          guard let self else { break }
+          self.invalidateTargetAppCache()
         }
       }
     }
@@ -116,14 +120,51 @@ final class TextExpansionEngine {
   func stop() {
     healthTimer?.invalidate()
     healthTimer = nil
+    currentHealthInterval = 0
     defaultsTask?.cancel()
     defaultsTask = nil
+    ignoredAppsTask?.cancel()
+    ignoredAppsTask = nil
     if let appSwitchObserver {
       NSWorkspace.shared.notificationCenter.removeObserver(appSwitchObserver)
       self.appSwitchObserver = nil
     }
     tearDownEventTap()
     typingBuffer = ""
+    invalidateTargetAppCache()
+  }
+
+  private func invalidateTargetAppCache() {
+    cachedTargetPID = -1
+    cachedTargetApp = nil
+    cachedTargetIsIgnored = false
+  }
+
+  /// Polls every 1.5s only while waiting for Accessibility permission grant; relaxes to 6.0s
+  /// (with 1.5s coalescing tolerance) during normal operation to minimize idle CPU wakeups.
+  private func updateAdaptiveHealthTimer() {
+    let needsFastCheck = Defaults[.textExpansionEnabled] && !isEventTapActive
+    let desiredInterval: TimeInterval = needsFastCheck ? 1.5 : 6.0
+    guard healthTimer == nil || currentHealthInterval != desiredInterval else { return }
+
+    healthTimer?.invalidate()
+    currentHealthInterval = desiredInterval
+    let timer = Timer(timeInterval: desiredInterval, repeats: true) { [weak self] _ in
+      if Thread.isMainThread {
+        MainActor.assumeIsolated {
+          self?.refreshStatusAndEnsureEventTap()
+          self?.updateAdaptiveHealthTimer()
+        }
+      } else {
+        DispatchQueue.main.async { [weak self] in
+          self?.refreshStatusAndEnsureEventTap()
+          self?.updateAdaptiveHealthTimer()
+        }
+      }
+    }
+    timer.tolerance = needsFastCheck ? 0.3 : 1.5
+    RunLoop.main.add(timer, forMode: .common)
+    healthTimer = timer
   }
 
   func resetBuffer() {
@@ -393,20 +434,33 @@ final class TextExpansionEngine {
       return false
     }
 
-    let myPID = ProcessInfo.processInfo.processIdentifier
     let rawTargetPID = pid_t(cgEvent.getIntegerValueField(.eventTargetUnixProcessID))
     let targetApp: NSRunningApplication?
     let isTargetingMaccy: Bool
+    let isIgnoredTarget: Bool
 
     if rawTargetPID > 0 {
       isTargetingMaccy = (rawTargetPID == myPID)
-      targetApp = isTargetingMaccy
-        ? NSRunningApplication.current
-        : NSRunningApplication(processIdentifier: rawTargetPID)
+      if isTargetingMaccy {
+        targetApp = NSRunningApplication.current
+        isIgnoredTarget = false
+      } else if rawTargetPID == cachedTargetPID {
+        targetApp = cachedTargetApp
+        isIgnoredTarget = cachedTargetIsIgnored
+      } else {
+        let resolvedApp = NSRunningApplication(processIdentifier: rawTargetPID)
+        let ignored = Clipboard.shared.isAppIgnored(resolvedApp?.bundleIdentifier)
+        cachedTargetPID = rawTargetPID
+        cachedTargetApp = resolvedApp
+        cachedTargetIsIgnored = ignored
+        targetApp = resolvedApp
+        isIgnoredTarget = ignored
+      }
     } else {
       let front = NSWorkspace.shared.frontmostApplication
       isTargetingMaccy = (front?.processIdentifier == myPID) && (NSApp.keyWindow != nil)
       targetApp = front
+      isIgnoredTarget = !isTargetingMaccy && Clipboard.shared.isAppIgnored(front?.bundleIdentifier)
     }
 
     // Never expand inside Maccy's own windows EXCEPT the dedicated live test box in Snippet Studio
@@ -415,14 +469,7 @@ final class TextExpansionEngine {
       return false
     }
 
-    if !isTargetingMaccy, Clipboard.shared.isAppIgnored(targetApp?.bundleIdentifier) {
-      typingBuffer = ""
-      return false
-    }
-
-    // Security guard: skip real password fields (`AXSecureTextField`) without false-positively
-    // breaking when background apps leave global `IsSecureEventInputEnabled()` stuck on.
-    if Self.isFocusedElementPasswordField() {
+    if isIgnoredTarget {
       typingBuffer = ""
       return false
     }
@@ -473,50 +520,57 @@ final class TextExpansionEngine {
       typedChunk = decoded
     }
 
+    let store = SnippetStore.shared
     typingBuffer.append(typedChunk)
-    let maxLen = SnippetStore.shared.maxAbbreviationLength + 8
+    let maxLen = store.maxAbbreviationLength + 8
     if typingBuffer.count > maxLen {
       typingBuffer = String(typingBuffer.suffix(maxLen))
     }
 
-    let candidates = SnippetStore.shared.activeExpansionCandidates
-    guard !candidates.isEmpty else {
+    guard !store.activeExpansionCandidates.isEmpty, let lastChar = typingBuffer.last else {
       return false
     }
 
-    // 1. Check `.afterDelimiter` rules if the user just typed a delimiter character
-    if let lastChar = typingBuffer.last, Self.delimiterCharacters.contains(lastChar) {
+    // 1. Check `.afterDelimiter` rules via O(1) last-character bucket if the user just typed a delimiter
+    if Self.delimiterCharacters.contains(lastChar) {
       let bufferBeforeDelimiter = String(typingBuffer.dropLast())
-      if !bufferBeforeDelimiter.isEmpty,
-         let (matchedCandidate, typedSlice) = findMatchingCandidate(
-           in: bufferBeforeDelimiter,
-           candidates: candidates,
-           mode: .afterDelimiter
-         ) {
-        let delimiterString = (lastChar == "\r") ? "\n" : String(lastChar)
-        let alreadyInsertedCount = max(0, typedSlice.count - max(0, typedChunk.count - 1))
-        let extraAutocompleteDelete = (alreadyInsertedCount > 0 && Self.hasNonEmptySelectedTextInFocusedElement()) ? 1 : 0
-        scheduleSwallowedExpansion(
-          candidate: matchedCandidate,
-          typedAbbreviation: typedSlice,
-          backspacesToDelete: alreadyInsertedCount + extraAutocompleteDelete,
-          trailingDelimiter: delimiterString,
-          targetApp: targetApp,
-          useDirectResponderForMaccy: isTargetingMaccy
-        )
-        // Swallow the delimiter keystroke; `trailingDelimiter` will be pasted atomically with the expansion
-        return true
+      if let prevLast = bufferBeforeDelimiter.last {
+        let bucket = store.delimiterCandidates(endingWith: prevLast)
+        if !bucket.isEmpty,
+           let (matchedCandidate, typedSlice) = findMatchingCandidate(in: bufferBeforeDelimiter, bucket: bucket) {
+          let focusedElem = Self.focusedAXElement()
+          guard !Self.isPasswordElement(focusedElem) else {
+            typingBuffer = ""
+            return false
+          }
+          let delimiterString = (lastChar == "\r") ? "\n" : String(lastChar)
+          let alreadyInsertedCount = max(0, typedSlice.count - max(0, typedChunk.count - 1))
+          let extraAutocompleteDelete = (alreadyInsertedCount > 0 && Self.hasNonEmptySelectedText(in: focusedElem)) ? 1 : 0
+          scheduleSwallowedExpansion(
+            candidate: matchedCandidate,
+            typedAbbreviation: typedSlice,
+            backspacesToDelete: alreadyInsertedCount + extraAutocompleteDelete,
+            trailingDelimiter: delimiterString,
+            targetApp: targetApp,
+            useDirectResponderForMaccy: isTargetingMaccy
+          )
+          // Swallow the delimiter keystroke; `trailingDelimiter` will be pasted atomically with the expansion
+          return true
+        }
       }
     }
 
-    // 2. Check `.immediate` rules ("Expand on match" ⚡)
-    if let (matchedCandidate, typedSlice) = findMatchingCandidate(
-      in: typingBuffer,
-      candidates: candidates,
-      mode: .immediate
-    ) {
+    // 2. Check `.immediate` rules ("Expand on match" ⚡) via O(1) last-character bucket
+    let immediateBucket = store.immediateCandidates(endingWith: lastChar)
+    if !immediateBucket.isEmpty,
+       let (matchedCandidate, typedSlice) = findMatchingCandidate(in: typingBuffer, bucket: immediateBucket) {
+      let focusedElem = Self.focusedAXElement()
+      guard !Self.isPasswordElement(focusedElem) else {
+        typingBuffer = ""
+        return false
+      }
       let alreadyInsertedCount = max(0, typedSlice.count - typedChunk.count)
-      let extraAutocompleteDelete = (alreadyInsertedCount > 0 && Self.hasNonEmptySelectedTextInFocusedElement()) ? 1 : 0
+      let extraAutocompleteDelete = (alreadyInsertedCount > 0 && Self.hasNonEmptySelectedText(in: focusedElem)) ? 1 : 0
       scheduleSwallowedExpansion(
         candidate: matchedCandidate,
         typedAbbreviation: typedSlice,
@@ -534,13 +588,12 @@ final class TextExpansionEngine {
 
   private func findMatchingCandidate(
     in buffer: String,
-    candidates: [ActiveExpansionCandidate],
-    mode: SnippetTriggerMode
+    bucket: [ActiveExpansionCandidate]
   ) -> (ActiveExpansionCandidate, String)? {
-    guard !buffer.isEmpty else { return nil }
-    let lowerBuffer = buffer.lowercased()
+    guard !buffer.isEmpty, !bucket.isEmpty else { return nil }
+    var lazyLowerBuffer: String?
 
-    for candidate in candidates where candidate.item.triggerMode == mode {
+    for candidate in bucket {
       let abbr = candidate.effectiveAbbreviation
       let abbrCount = abbr.count
       guard buffer.count >= abbrCount else { continue }
@@ -550,7 +603,12 @@ final class TextExpansionEngine {
       case .caseSensitive:
         matchesSuffix = buffer.hasSuffix(abbr)
       case .ignoreCase, .propagateCase:
-        matchesSuffix = lowerBuffer.hasSuffix(candidate.lowercasedAbbreviation)
+        let lower = lazyLowerBuffer ?? {
+          let computed = buffer.lowercased()
+          lazyLowerBuffer = computed
+          return computed
+        }()
+        matchesSuffix = lower.hasSuffix(candidate.lowercasedAbbreviation)
       }
       guard matchesSuffix else { continue }
 
@@ -637,20 +695,28 @@ final class TextExpansionEngine {
     }
   }
 
-  // MARK: - Accessibility Element Inspection Helpers
+  // MARK: - Accessibility Element Inspection Helpers (Bounded Timeout, Called Only on Match)
+
+  private static let systemWideAXElement: AXUIElement = {
+    let elem = AXUIElementCreateSystemWide()
+    // Cap cross-process AX IPC at 80ms so a hung target app can never stall CGEventTap
+    AXUIElementSetMessagingTimeout(elem, 0.08)
+    return elem
+  }()
 
   private static func focusedAXElement() -> AXUIElement? {
-    let systemWide = AXUIElementCreateSystemWide()
     var focusedRef: CFTypeRef?
-    let err = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef)
+    let err = AXUIElementCopyAttributeValue(systemWideAXElement, kAXFocusedUIElementAttribute as CFString, &focusedRef)
     guard err == .success, let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else {
       return nil
     }
-    return unsafeDowncast(focusedRef, to: AXUIElement.self)
+    let focused = unsafeDowncast(focusedRef, to: AXUIElement.self)
+    AXUIElementSetMessagingTimeout(focused, 0.08)
+    return focused
   }
 
-  private static func isFocusedElementPasswordField() -> Bool {
-    guard let elem = focusedAXElement() else { return false }
+  private static func isPasswordElement(_ elem: AXUIElement?) -> Bool {
+    guard let elem else { return false }
     var roleRef: CFTypeRef?
     if AXUIElementCopyAttributeValue(elem, kAXRoleAttribute as CFString, &roleRef) == .success,
        let role = roleRef as? String,
@@ -666,8 +732,8 @@ final class TextExpansionEngine {
     return false
   }
 
-  private static func hasNonEmptySelectedTextInFocusedElement() -> Bool {
-    guard let elem = focusedAXElement() else { return false }
+  private static func hasNonEmptySelectedText(in elem: AXUIElement?) -> Bool {
+    guard let elem else { return false }
     var selectedRef: CFTypeRef?
     guard AXUIElementCopyAttributeValue(elem, kAXSelectedTextAttribute as CFString, &selectedRef) == .success,
           let selectedStr = selectedRef as? String else {
