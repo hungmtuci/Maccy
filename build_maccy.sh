@@ -12,7 +12,7 @@ export COPYFILE_DISABLE=1
 
 APP_NAME="Maccy"
 BUNDLE_ID="org.p0deje.Maccy"
-VERSION="3.1.1-custom"
+VERSION="3.1.2-custom"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 WORKSPACE_APP_BUNDLE="$(dirname "$PROJECT_DIR")/$APP_NAME.app"
 SPM_SCRATCH_DIR="/tmp/maccy_spm_build"
@@ -132,7 +132,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 	<key>CFBundleShortVersionString</key>
 	<string>${VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>311</string>
+	<string>312</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © Alexey Rodionov • Custom Edition by Hung Le Xuan</string>
 	<key>NSAppleEventsUsageDescription</key>

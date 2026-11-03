@@ -121,6 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     if !Self.isTesting {
+      _ = CloudSyncManager.shared
       _ = SnippetStore.shared
       _ = SoftwareUpdater.shared
       TextExpansionEngine.shared.start()

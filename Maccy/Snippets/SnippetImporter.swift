@@ -251,6 +251,7 @@ nonisolated enum SnippetImporter {
       var wholeWord: Bool
       var caseHandling: String
       var expansionCount: Int
+      var enabled: Bool?
     }
     struct SetDTO: Decodable {
       var name: String
@@ -293,6 +294,8 @@ nonisolated enum SnippetImporter {
           const wws = rs.rules.wholeWord();
           const cases = rs.rules.caseHandling();
           const counts = rs.rules.expansionCount();
+          let enabledArr = null;
+          try { enabledArr = rs.rules.enabled(); } catch (e) {}
           for (let j = 0; j < count; j++) {
             rulesOut.push({
               abbreviation: String(abbrs[j] || ""),
@@ -300,7 +303,8 @@ nonisolated enum SnippetImporter {
               description: String(descs[j] || ""),
               wholeWord: Boolean(wws[j]),
               caseHandling: String(cases[j] || "case does not matter"),
-              expansionCount: Number(counts[j] || 0)
+              expansionCount: Number(counts[j] || 0),
+              enabled: Array.isArray(enabledArr) ? Boolean(enabledArr[j]) : true
             });
           }
         }
@@ -309,13 +313,16 @@ nonisolated enum SnippetImporter {
         for (let j = 0; j < ruleRefs.length; j++) {
           const r = ruleRefs[j];
           try {
+            let rEnabled = true;
+            try { rEnabled = Boolean(r.enabled()); } catch (e) {}
             rulesOut.push({
               abbreviation: String(r.abbreviation() || ""),
               plainExpansion: String(r.plainExpansion() || ""),
               description: String(r.description() || ""),
               wholeWord: Boolean(r.wholeWord()),
               caseHandling: String(r.caseHandling() || "case does not matter"),
-              expansionCount: Number(r.expansionCount() || 0)
+              expansionCount: Number(r.expansionCount() || 0),
+              enabled: rEnabled
             });
           } catch (innerErr) {}
         }
@@ -350,8 +357,12 @@ nonisolated enum SnippetImporter {
     }
 
     var collections: [ImportedCollectionPayload] = []
+    var indexBySetKey: [String: Int] = [:]
+
     for rs in decoded.sets {
+      let trimmedSetName = rs.name.trimmingCharacters(in: .whitespacesAndNewlines)
       let isRegexSet = rs.ruleType.lowercased().contains("regular expression")
+      let isFactoryDefaultSet = trimmedSetName.caseInsensitiveCompare("Default Set") == .orderedSame
       var items: [ImportedSnippetPayload] = []
       items.reserveCapacity(rs.rules.count)
 
@@ -370,16 +381,23 @@ nonisolated enum SnippetImporter {
           caseMode = .ignoreCase
         }
 
+        let effectiveAbbr = rs.commonPrefix + abbr + rs.commonSuffix
+        let isShortPureWord = !effectiveAbbr.isEmpty
+          && effectiveAbbr.count <= 4
+          && effectiveAbbr.allSatisfy(\.isLetter)
+        let effectiveWholeWord = rule.wholeWord || isShortPureWord
+
         let triggerMode: SnippetTriggerMode
         if isRegexSet || abbr.isEmpty {
           triggerMode = .manualOnly
-        } else if rule.wholeWord {
+        } else if rule.wholeWord || (isFactoryDefaultSet && isShortPureWord) {
           triggerMode = .afterDelimiter
         } else {
           triggerMode = .immediate
         }
 
         let desc = rule.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ruleEnabled = (rule.enabled ?? true) && !isRegexSet
         items.append(
           ImportedSnippetPayload(
             name: desc,
@@ -388,19 +406,38 @@ nonisolated enum SnippetImporter {
             contentMode: .plainText,
             triggerMode: triggerMode,
             caseMode: caseMode,
-            wholeWord: rule.wholeWord,
-            isEnabled: !isRegexSet,
+            wholeWord: effectiveWholeWord,
+            isEnabled: ruleEnabled,
             usageCount: max(0, rule.expansionCount)
           )
         )
       }
 
-      if !items.isEmpty {
+      guard !items.isEmpty else { continue }
+      let setKey = "\(trimmedSetName.lowercased())|\(rs.commonPrefix)|\(rs.commonSuffix)"
+      let shouldEnableSet = rs.enabled && !isRegexSet && !isFactoryDefaultSet
+
+      if let existingIdx = indexBySetKey[setKey] {
+        var existingAbbrs = Set(collections[existingIdx].items.map { $0.abbreviation.lowercased() })
+        for item in items {
+          let lower = item.abbreviation.lowercased()
+          if lower.isEmpty || !existingAbbrs.contains(lower) {
+            collections[existingIdx].items.append(item)
+            if !lower.isEmpty {
+              existingAbbrs.insert(lower)
+            }
+          }
+        }
+        if shouldEnableSet {
+          collections[existingIdx].isEnabled = true
+        }
+      } else {
+        indexBySetKey[setKey] = collections.count
         collections.append(
           ImportedCollectionPayload(
-            name: rs.name,
-            icon: rs.name.lowercased().contains("autocorrect") ? "checkmark.bubble" : "bolt.horizontal.circle",
-            isEnabled: rs.enabled && !isRegexSet,
+            name: trimmedSetName.isEmpty ? rs.name : trimmedSetName,
+            icon: trimmedSetName.lowercased().contains("autocorrect") ? "checkmark.bubble" : "bolt.horizontal.circle",
+            isEnabled: shouldEnableSet,
             keywordPrefix: rs.commonPrefix,
             keywordSuffix: rs.commonSuffix,
             items: items

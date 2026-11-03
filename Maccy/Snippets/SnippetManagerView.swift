@@ -68,8 +68,6 @@ private extension Notification.Name {
 // MARK: - Native macOS SplitView + Unified Toolbar Snippet Studio
 
 struct SnippetStudioView: View {
-  private static let allCollectionsSentinel = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
-
   @State private var store = SnippetStore.shared
   @State private var engine = TextExpansionEngine.shared
   @Default(.textExpansionEnabled) private var textExpansionEnabled
@@ -77,7 +75,8 @@ struct SnippetStudioView: View {
   @Default(.cloudSyncEnabled) private var cloudSyncEnabled
   @Default(.cloudSyncFolderPath) private var cloudSyncFolderPath
 
-  @State private var selectedCollectionId: UUID?
+  @State private var selectedScope: SnippetStudioScope = .all
+  @State private var searchInSelectedScopeOnly: Bool = false
   @State private var selectedItemId: UUID?
   @State private var studioSearchQuery: String = ""
 
@@ -94,8 +93,23 @@ struct SnippetStudioView: View {
   @FocusState private var abbreviationFieldFocused: Bool
   @FocusState private var liveTestFieldFocused: Bool
 
+  private var selectedCollectionId: UUID? {
+    if case .collection(let id) = selectedScope {
+      return id
+    }
+    return nil
+  }
+
+  private var isSearching: Bool {
+    !studioSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
   private var visibleItems: [SnippetItem] {
-    store.items(in: selectedCollectionId, searchQuery: studioSearchQuery)
+    store.items(
+      for: selectedScope,
+      searchQuery: studioSearchQuery,
+      searchAllCollectionsWhenQuerying: !searchInSelectedScopeOnly
+    )
   }
 
   private var currentSelectedItem: SnippetItem? {
@@ -112,11 +126,23 @@ struct SnippetStudioView: View {
     if !textExpansionEnabled || ignoreEvents {
       statusText = "Đang tạm dừng"
     } else if engine.isEventTapActive {
-      statusText = "Đang bắt phím (\(store.activeExpansionCandidates.count) mục kích hoạt)"
+      statusText = "Đang bắt phím (\(store.activeExpansionItems.count) mục kích hoạt)"
     } else {
       statusText = "Chưa cấp quyền Bàn phím"
     }
-    return "\(store.items.count) gõ tắt • \(statusText)"
+    return "\(store.items.count) mục tổng • \(statusText)"
+  }
+
+  private var currentScopeShortLabel: String {
+    switch selectedScope {
+    case .all:
+      return "Tất cả"
+    case .activeTriggers:
+      return "Đang kích hoạt"
+    case .collection(let id):
+      let name = store.collection(for: id)?.name ?? "Bộ đang chọn"
+      return "Bộ \"\(name)\""
+    }
   }
 
   var body: some View {
@@ -150,8 +176,14 @@ struct SnippetStudioView: View {
         }
 
         VSplitView {
-          snippetsNativeTablePane
-            .frame(minHeight: 175, idealHeight: 250)
+          VStack(spacing: 0) {
+            if isSearching && selectedScope != .all {
+              searchScopeBar
+              Divider()
+            }
+            snippetsNativeTablePane
+          }
+          .frame(minHeight: 175, idealHeight: 255)
 
           snippetInspectorPane
             .frame(minHeight: 255)
@@ -163,7 +195,7 @@ struct SnippetStudioView: View {
     .searchable(
       text: $studioSearchQuery,
       placement: .toolbar,
-      prompt: "Tìm từ gõ tắt, tên, nội dung…"
+      prompt: "Tìm từ gõ tắt, tên, nội dung trên toàn bộ danh sách…"
     )
     .toolbar {
       ToolbarItemGroup(placement: .primaryAction) {
@@ -193,7 +225,7 @@ struct SnippetStudioView: View {
       engine.refreshStatusAndEnsureEventTap()
       if let req = SnippetManagerWindowController.shared.requestedSelectedItemId,
          let found = store.item(for: req) {
-        selectedCollectionId = found.collectionId
+        selectedScope = .collection(found.collectionId)
         selectedItemId = found.id
         SnippetManagerWindowController.shared.requestedSelectedItemId = nil
         if found.abbreviation.isEmpty {
@@ -211,6 +243,13 @@ struct SnippetStudioView: View {
     .onDisappear {
       engine.isStudioTestFieldFocused = false
     }
+    .onChange(of: studioSearchQuery) { _, _ in
+      let current = visibleItems
+      if let sel = selectedItemId, current.contains(where: { $0.id == sel }) {
+        return
+      }
+      selectedItemId = current.first?.id
+    }
     .onChange(of: liveTestFieldFocused) { _, focused in
       engine.isStudioTestFieldFocused = focused
     }
@@ -225,7 +264,7 @@ struct SnippetStudioView: View {
     }
     .onReceive(NotificationCenter.default.publisher(for: .snippetStudioSelectRequested)) { note in
       if let id = note.object as? UUID, let found = store.item(for: id) {
-        selectedCollectionId = found.collectionId
+        selectedScope = .collection(found.collectionId)
         selectedItemId = found.id
         if found.abbreviation.isEmpty {
           abbreviationFieldFocused = true
@@ -244,9 +283,53 @@ struct SnippetStudioView: View {
     .sheet(isPresented: $isCreatingCollection) {
       NewCollectionSheet { name, prefix, suffix in
         let created = store.createCollection(name: name, keywordPrefix: prefix, keywordSuffix: suffix)
-        selectedCollectionId = created.id
+        selectedScope = .collection(created.id)
       }
     }
+  }
+
+  private var searchScopeBar: some View {
+    let allCount = store.items(for: .all, searchQuery: studioSearchQuery, searchAllCollectionsWhenQuerying: false).count
+    let scopedCount = store.items(for: selectedScope, searchQuery: studioSearchQuery, searchAllCollectionsWhenQuerying: false).count
+
+    return HStack(spacing: 8) {
+      Image(systemName: "magnifyingglass")
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+      Text("Phạm vi tìm:")
+        .font(.system(size: 11.5, weight: .medium))
+        .foregroundStyle(.secondary)
+
+      scopePillButton(title: "Tất cả (\(allCount))", isSelected: !searchInSelectedScopeOnly) {
+        searchInSelectedScopeOnly = false
+        selectedItemId = visibleItems.first?.id
+      }
+
+      scopePillButton(title: "\(currentScopeShortLabel) (\(scopedCount))", isSelected: searchInSelectedScopeOnly) {
+        searchInSelectedScopeOnly = true
+        selectedItemId = visibleItems.first?.id
+      }
+
+      Spacer()
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 5)
+    .background(Color.primary.opacity(0.03))
+  }
+
+  private func scopePillButton(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Text(title)
+        .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+        .foregroundStyle(isSelected ? Color.white : Color.primary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2.5)
+        .background(
+          Capsule()
+            .fill(isSelected ? Color.accentColor : Color.primary.opacity(0.08))
+        )
+    }
+    .buttonStyle(.plain)
   }
 
   // MARK: - Unified macOS Toolbar Items
@@ -317,12 +400,27 @@ struct SnippetStudioView: View {
         }
       }
 
+      Section("Làm sạch & Đồng nhất") {
+        Button {
+          let result = store.deduplicateAndSanitizeNow()
+          if result.didMutate {
+            statusBanner = "Đã gộp \(result.mergedCollectionsCount) bộ trùng và xoá \(result.removedDuplicateItemsCount) mục trùng lặp."
+          } else {
+            statusBanner = "Danh sách đã đồng nhất, không có Bộ hay Gõ tắt nào bị trùng lặp."
+          }
+        } label: {
+          Label("Gộp Bộ trùng & Dọn trùng lặp", systemImage: "sparkles")
+        }
+      }
+
       Section("Sao lưu & Đồng bộ") {
-        if cloudSyncEnabled && !cloudSyncFolderPath.isEmpty {
+        if cloudSyncEnabled {
           Button {
             Task { @MainActor in
               await store.syncWithGoogleDrive()
-              statusBanner = store.lastSnippetSyncMessage
+              statusBanner = store.lastSnippetSyncMessage.isEmpty
+                ? "Không tìm thấy thư mục Google Drive trên máy này."
+                : store.lastSnippetSyncMessage
             }
           } label: {
             Label("Đồng bộ Google Drive ngay", systemImage: "arrow.triangle.2.circlepath.icloud")
@@ -345,7 +443,7 @@ struct SnippetStudioView: View {
       Label(isImportingBusy ? "Đang nhập…" : "Nhập / Xuất", systemImage: "ellipsis.circle")
     }
     .disabled(isImportingBusy)
-    .help("Nhập từ Typinator, Alfred, tệp tin hoặc xuất sao lưu")
+    .help("Nhập từ Typinator, Alfred, dọn trùng lặp hoặc xuất sao lưu")
   }
 
   private var liveTestPopoverContent: some View {
@@ -490,25 +588,46 @@ struct SnippetStudioView: View {
   private var collectionsSidebar: some View {
     VStack(spacing: 0) {
       List(selection: Binding(
-        get: { selectedCollectionId ?? Self.allCollectionsSentinel },
-        set: { newVal in
-          selectedCollectionId = (newVal == Self.allCollectionsSentinel) ? nil : newVal
-          selectedItemId = store.items(in: selectedCollectionId, searchQuery: studioSearchQuery).first?.id
+        get: { selectedScope },
+        set: { newScope in
+          selectedScope = newScope
+          if newScope == .all {
+            searchInSelectedScopeOnly = false
+          }
+          selectedItemId = store.items(
+            for: newScope,
+            searchQuery: studioSearchQuery,
+            searchAllCollectionsWhenQuerying: !searchInSelectedScopeOnly
+          ).first?.id
         }
       )) {
-        Section {
+        Section("Tổng quan") {
           HStack(spacing: 8) {
             Image(systemName: "tray.full")
               .foregroundStyle(Color.accentColor)
               .frame(width: 16)
-            Text("Tất cả Gõ tắt")
+            Text("Tất cả Mục")
               .fontWeight(.medium)
             Spacer()
             Text("\(store.items.count)")
               .font(.caption.monospacedDigit())
               .foregroundStyle(.secondary)
           }
-          .tag(Self.allCollectionsSentinel)
+          .tag(SnippetStudioScope.all)
+
+          HStack(spacing: 8) {
+            Image(systemName: "bolt.circle.fill")
+              .foregroundStyle(isEngineReady ? Color.green : Color.orange)
+              .frame(width: 16)
+            Text("Đang kích hoạt gõ phím")
+              .fontWeight(.medium)
+            Spacer()
+            Text("\(store.activeExpansionItems.count)")
+              .font(.caption.monospacedDigit().weight(.semibold))
+              .foregroundStyle(isEngineReady ? Color.green : Color.secondary)
+          }
+          .tag(SnippetStudioScope.activeTriggers)
+          .help("Danh sách chính xác các từ gõ tắt đang tự động bắt phím trên toàn hệ thống")
         }
 
         Section("Bộ Gõ tắt") {
@@ -549,10 +668,10 @@ struct SnippetStudioView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
             }
-            .tag(col.id)
+            .tag(SnippetStudioScope.collection(col.id))
             .contextMenu {
               Button("Thêm Gõ tắt vào Bộ này") {
-                selectedCollectionId = col.id
+                selectedScope = .collection(col.id)
                 createNewSnippet(in: col.id)
               }
               Button("Đổi tên & Tiền tố Bộ…") {
@@ -561,7 +680,7 @@ struct SnippetStudioView: View {
               Divider()
               Button("Xoá Bộ này", role: .destructive) {
                 if selectedCollectionId == col.id {
-                  selectedCollectionId = nil
+                  selectedScope = .all
                 }
                 store.deleteCollection(col.id)
               }
@@ -601,7 +720,7 @@ struct SnippetStudioView: View {
           .help("Chỉnh sửa tên & tiền tố Bộ đang chọn")
 
           Button {
-            selectedCollectionId = nil
+            selectedScope = .all
             store.deleteCollection(colId)
           } label: {
             Image(systemName: "trash")
@@ -624,31 +743,53 @@ struct SnippetStudioView: View {
       TableColumn("Từ gõ tắt") { snippet in
         let col = store.collection(for: snippet.collectionId)
         let effAbbr = snippet.effectiveAbbreviation(in: col)
+        let isLive = store.isActivelyExpanding(snippet)
         if effAbbr.isEmpty {
           Text("—")
             .foregroundStyle(.tertiary)
         } else {
           Text(effAbbr)
             .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-            .foregroundStyle(snippet.isEnabled ? Color.accentColor : Color.secondary)
+            .foregroundStyle(isLive ? Color.accentColor : Color.secondary)
             .padding(.horizontal, 6)
             .padding(.vertical, 1.5)
             .background(
               RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(Color.accentColor.opacity(snippet.isEnabled ? 0.12 : 0.05))
+                .fill(isLive ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.06))
             )
             .lineLimit(1)
         }
       }
-      .width(min: 85, ideal: 115, max: 185)
+      .width(min: 80, ideal: 105, max: 165)
 
       TableColumn("Tên gợi nhớ") { snippet in
+        let colEnabled = store.collection(for: snippet.collectionId)?.isEnabled ?? true
         Text(snippet.displayTitle)
           .font(.system(size: 12.5, weight: .medium))
-          .foregroundStyle(snippet.isEnabled ? Color.primary : Color.secondary)
+          .foregroundStyle((snippet.isEnabled && colEnabled) ? Color.primary : Color.secondary)
           .lineLimit(1)
       }
-      .width(min: 140, ideal: 205, max: 320)
+      .width(min: 130, ideal: 185, max: 290)
+
+      TableColumn("Bộ Gõ tắt") { snippet in
+        if let col = store.collection(for: snippet.collectionId) {
+          HStack(spacing: 4) {
+            if !col.isEnabled {
+              Image(systemName: "pause.circle")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            }
+            Text(col.name)
+              .font(.system(size: 11.5))
+              .foregroundStyle(col.isEnabled ? Color.secondary : Color.secondary.opacity(0.6))
+              .lineLimit(1)
+          }
+        } else {
+          Text("—")
+            .foregroundStyle(.tertiary)
+        }
+      }
+      .width(min: 95, ideal: 125, max: 170)
 
       TableColumn("Nội dung mở rộng") { snippet in
         let previewLine = store.singleLinePreview(for: snippet)
@@ -658,17 +799,21 @@ struct SnippetStudioView: View {
           .lineLimit(1)
       }
 
-      TableColumn("Chế độ") { snippet in
+      TableColumn("Trạng thái") { snippet in
+        let col = store.collection(for: snippet.collectionId)
+        let effAbbr = snippet.effectiveAbbreviation(in: col)
+        let status = statusBadgeInfo(for: snippet, collection: col, effectiveAbbreviation: effAbbr)
         HStack(spacing: 4) {
-          Image(systemName: snippet.triggerMode.badgeSymbol)
+          Image(systemName: status.symbol)
             .font(.system(size: 10))
-            .foregroundStyle(snippet.triggerMode == .immediate ? Color.accentColor : Color.secondary)
-          Text(shortTriggerLabel(for: snippet.triggerMode))
+            .foregroundStyle(status.color)
+          Text(status.label)
             .font(.system(size: 11))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(status.isMuted ? Color.secondary.opacity(0.75) : Color.secondary)
+            .lineLimit(1)
         }
       }
-      .width(min: 85, ideal: 100, max: 125)
+      .width(min: 95, ideal: 112, max: 135)
     }
     .tableStyle(.inset(alternatesRowBackgrounds: true))
     .contextMenu(forSelectionType: SnippetItem.ID.self) { ids in
@@ -703,11 +848,27 @@ struct SnippetStudioView: View {
     }
   }
 
-  private func shortTriggerLabel(for mode: SnippetTriggerMode) -> String {
-    switch mode {
-    case .immediate: return "Tức thì"
-    case .afterDelimiter: return "Sau dấu cách"
-    case .manualOnly: return "Thủ công"
+  private func statusBadgeInfo(
+    for snippet: SnippetItem,
+    collection: SnippetCollection?,
+    effectiveAbbreviation: String
+  ) -> (symbol: String, label: String, color: Color, isMuted: Bool) {
+    if collection?.isEnabled == false {
+      return ("pause.circle", "Bộ đang tắt", .secondary, true)
+    }
+    if !snippet.isEnabled {
+      return ("pause.circle", "Đã tạm tắt", .secondary, true)
+    }
+    if snippet.triggerMode == .manualOnly || effectiveAbbreviation.isEmpty {
+      return ("hand.tap", "Thủ công", .secondary, false)
+    }
+    switch snippet.triggerMode {
+    case .immediate:
+      return ("bolt.fill", "Tức thì", Color.accentColor, false)
+    case .afterDelimiter:
+      return ("space", "Sau dấu cách", Color.green, false)
+    case .manualOnly:
+      return ("hand.tap", "Thủ công", .secondary, false)
     }
   }
 
@@ -1131,13 +1292,19 @@ struct SnippetStudioView: View {
   // MARK: - Item & Import/Export Helpers
 
   private func createNewSnippet(in collectionId: UUID? = nil) {
-    let targetCol = collectionId ?? selectedCollectionId ?? store.collections.first?.id
+    let targetCol = collectionId
+      ?? selectedCollectionId
+      ?? store.collections.first(where: \.isEnabled)?.id
+      ?? store.collections.first?.id
     let created = store.createItem(
       in: targetCol,
       name: "",
       abbreviation: "",
       content: ""
     )
+    if selectedScope == .activeTriggers {
+      selectedScope = .collection(created.collectionId)
+    }
     selectedItemId = created.id
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
       abbreviationFieldFocused = true

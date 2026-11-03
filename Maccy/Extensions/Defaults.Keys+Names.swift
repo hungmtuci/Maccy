@@ -91,4 +91,5 @@ nonisolated extension Defaults.Keys {
   static let textExpansionEnabled = Key<Bool>("textExpansionEnabled", default: true, suite: preferencesSuite)
   static let expandPlaySound = Key<Bool>("expandPlaySound", default: false, suite: preferencesSuite)
   static let restoreClipboardAfterExpansion = Key<Bool>("restoreClipboardAfterExpansion", default: true, suite: preferencesSuite)
+  static let didSanitizeTypinatorDefaultSet = Key<Bool>("didSanitizeTypinatorDefaultSet", default: false, suite: preferencesSuite)
 }

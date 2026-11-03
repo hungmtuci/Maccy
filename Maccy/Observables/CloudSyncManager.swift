@@ -425,7 +425,7 @@ class CloudSyncManager {
       try FileManager.default.createDirectory(at: blobsURL, withIntermediateDirectories: true)
       let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
       let modDate = attrs?[.modificationDate] as? Date
-      let merged = Self.loadAndMergeDatabases(primaryURL: fileURL, folderURL: folderURL)
+      let merged = try Self.loadAndMergeDatabases(primaryURL: fileURL, folderURL: folderURL)
       return (merged.database, merged.conflictURLs, modDate)
     }.result
 
@@ -439,6 +439,7 @@ class CloudSyncManager {
       existingPrimaryModDate = loaded.primaryModDate
     case .failure(let error):
       lastSyncError = "Không thể truy cập thư mục đồng bộ: \(error.localizedDescription)"
+      await SnippetStore.shared.syncWithGoogleDrive()
       return
     }
 
@@ -940,8 +941,22 @@ class CloudSyncManager {
   nonisolated static func loadAndMergeDatabases(
     primaryURL: URL,
     folderURL: URL
-  ) -> (database: SyncDatabasePayload, conflictURLs: [URL]) {
-    var merged = readDatabase(from: primaryURL) ?? SyncDatabasePayload(updatedAt: Date.now, items: [:])
+  ) throws -> (database: SyncDatabasePayload, conflictURLs: [URL]) {
+    var merged: SyncDatabasePayload
+    if FileManager.default.fileExists(atPath: primaryURL.path) {
+      try? FileManager.default.startDownloadingUbiquitousItem(at: primaryURL)
+      let existingSize = (try? FileManager.default.attributesOfItem(atPath: primaryURL.path)[.size] as? Int64) ?? 0
+      if existingSize > 2 {
+        let data = try Data(contentsOf: primaryURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        merged = try decoder.decode(SyncDatabasePayload.self, from: data)
+      } else {
+        merged = SyncDatabasePayload(updatedAt: Date.now, items: [:])
+      }
+    } else {
+      merged = SyncDatabasePayload(updatedAt: Date.now, items: [:])
+    }
     let candidates = findConflictDatabaseURLs(in: folderURL)
     var decodedConflicts: [URL] = []
 

@@ -531,20 +531,36 @@ final class TextExpansionEngine {
       return false
     }
 
+    var cachedFocusedElem: AXUIElement?
+    var didFetchFocusedElem = false
+    let resolveFocusedElem: () -> AXUIElement? = {
+      if !didFetchFocusedElem {
+        cachedFocusedElem = Self.focusedAXElement()
+        didFetchFocusedElem = true
+      }
+      return cachedFocusedElem
+    }
+
     // 1. Check `.afterDelimiter` rules via O(1) last-character bucket if the user just typed a delimiter
     if Self.delimiterCharacters.contains(lastChar) {
       let bufferBeforeDelimiter = String(typingBuffer.dropLast())
       if let prevLast = bufferBeforeDelimiter.last {
         let bucket = store.delimiterCandidates(endingWith: prevLast)
+        let inFlightBeforeDelim = max(0, typedChunk.count - 1)
         if !bucket.isEmpty,
-           let (matchedCandidate, typedSlice) = findMatchingCandidate(in: bufferBeforeDelimiter, bucket: bucket) {
-          let focusedElem = Self.focusedAXElement()
+           let (matchedCandidate, typedSlice) = findMatchingCandidate(
+             in: bufferBeforeDelimiter,
+             bucket: bucket,
+             inFlightSuffixCount: inFlightBeforeDelim,
+             lazyFocusedElement: resolveFocusedElem
+           ) {
+          let focusedElem = resolveFocusedElem()
           guard !Self.isPasswordElement(focusedElem) else {
             typingBuffer = ""
             return false
           }
           let delimiterString = (lastChar == "\r") ? "\n" : String(lastChar)
-          let alreadyInsertedCount = max(0, typedSlice.count - max(0, typedChunk.count - 1))
+          let alreadyInsertedCount = max(0, typedSlice.count - inFlightBeforeDelim)
           let extraAutocompleteDelete = (alreadyInsertedCount > 0 && Self.hasNonEmptySelectedText(in: focusedElem)) ? 1 : 0
           scheduleSwallowedExpansion(
             candidate: matchedCandidate,
@@ -563,8 +579,13 @@ final class TextExpansionEngine {
     // 2. Check `.immediate` rules ("Expand on match" ⚡) via O(1) last-character bucket
     let immediateBucket = store.immediateCandidates(endingWith: lastChar)
     if !immediateBucket.isEmpty,
-       let (matchedCandidate, typedSlice) = findMatchingCandidate(in: typingBuffer, bucket: immediateBucket) {
-      let focusedElem = Self.focusedAXElement()
+       let (matchedCandidate, typedSlice) = findMatchingCandidate(
+         in: typingBuffer,
+         bucket: immediateBucket,
+         inFlightSuffixCount: typedChunk.count,
+         lazyFocusedElement: resolveFocusedElem
+       ) {
+      let focusedElem = resolveFocusedElem()
       guard !Self.isPasswordElement(focusedElem) else {
         typingBuffer = ""
         return false
@@ -586,9 +607,28 @@ final class TextExpansionEngine {
     return false
   }
 
+  private static func isWordCharacter(_ ch: Character) -> Bool {
+    ch.isLetter || ch.isNumber || ch == "_"
+  }
+
+  private static func requiresLeadingWordBoundary(for candidate: ActiveExpansionCandidate) -> Bool {
+    if candidate.item.wholeWord {
+      return true
+    }
+    guard let firstChar = candidate.effectiveAbbreviation.first else {
+      return false
+    }
+    // Abbreviations starting with a letter or digit (`dt`, `009`, `teh`) must never expand mid-word
+    // right after another letter/digit/underscore (e.g. `sdt` must never expand `dt`, `2009` must never expand `009`).
+    // Symbol-prefixed abbreviations (`\dt`, `\bcc`, `;sig`, `-lo`) expand freely anywhere.
+    return firstChar.isLetter || firstChar.isNumber
+  }
+
   private func findMatchingCandidate(
     in buffer: String,
-    bucket: [ActiveExpansionCandidate]
+    bucket: [ActiveExpansionCandidate],
+    inFlightSuffixCount: Int,
+    lazyFocusedElement: () -> AXUIElement?
   ) -> (ActiveExpansionCandidate, String)? {
     guard !buffer.isEmpty, !bucket.isEmpty else { return nil }
     var lazyLowerBuffer: String?
@@ -613,14 +653,30 @@ final class TextExpansionEngine {
       guard matchesSuffix else { continue }
 
       let matchStartIdx = buffer.index(buffer.endIndex, offsetBy: -abbrCount)
-      if candidate.item.wholeWord && matchStartIdx > buffer.startIndex {
-        let prevChar = buffer[buffer.index(before: matchStartIdx)]
-        if prevChar.isLetter || prevChar.isNumber || prevChar == "_" {
-          continue
+      let typedSlice = String(buffer[matchStartIdx..<buffer.endIndex])
+
+      if Self.requiresLeadingWordBoundary(for: candidate) {
+        if matchStartIdx > buffer.startIndex {
+          let prevChar = buffer[buffer.index(before: matchStartIdx)]
+          if Self.isWordCharacter(prevChar) {
+            continue
+          }
+        } else {
+          // `typingBuffer` started right at `matchStartIdx` (e.g. after mouse click / navigation).
+          // Inspect the 1 character immediately preceding the abbreviation in the focused UI element.
+          let alreadyInsertedUTF16 = typedSlice
+            .dropLast(min(typedSlice.count, max(0, inFlightSuffixCount)))
+            .utf16
+            .count
+          if Self.hasWordCharacterBeforeAbbreviation(
+            in: lazyFocusedElement(),
+            alreadyInsertedUTF16Count: alreadyInsertedUTF16
+          ) {
+            continue
+          }
         }
       }
 
-      let typedSlice = String(buffer[matchStartIdx..<buffer.endIndex])
       return (candidate, typedSlice)
     }
 
@@ -740,5 +796,57 @@ final class TextExpansionEngine {
       return false
     }
     return !selectedStr.isEmpty
+  }
+
+  private static func hasWordCharacterBeforeAbbreviation(
+    in elem: AXUIElement?,
+    alreadyInsertedUTF16Count: Int
+  ) -> Bool {
+    guard let elem else { return false }
+    var rangeRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(elem, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+          let rangeRef,
+          CFGetTypeID(rangeRef) == AXValueGetTypeID() else {
+      return false
+    }
+    let axVal = unsafeDowncast(rangeRef, to: AXValue.self)
+    var selectedRange = CFRange(location: 0, length: 0)
+    guard AXValueGetValue(axVal, .cfRange, &selectedRange) else {
+      return false
+    }
+
+    let abbrStartUTF16 = selectedRange.location - max(0, alreadyInsertedUTF16Count)
+    guard abbrStartUTF16 > 0 else {
+      return false
+    }
+
+    let fetchLen = min(2, abbrStartUTF16)
+    var queryRange = CFRange(location: abbrStartUTF16 - fetchLen, length: fetchLen)
+    if let paramVal = AXValueCreate(.cfRange, &queryRange) {
+      var subRef: CFTypeRef?
+      if AXUIElementCopyParameterizedAttributeValue(
+        elem,
+        kAXStringForRangeParameterizedAttribute as CFString,
+        paramVal,
+        &subRef
+      ) == .success,
+         let subStr = subRef as? String,
+         let prevChar = subStr.last {
+        return isWordCharacter(prevChar)
+      }
+    }
+
+    var valRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(elem, kAXValueAttribute as CFString, &valRef) == .success,
+       let fullStr = valRef as? String {
+      let nsStr = fullStr as NSString
+      if abbrStartUTF16 <= nsStr.length {
+        let slice = nsStr.substring(with: NSRange(location: abbrStartUTF16 - fetchLen, length: fetchLen))
+        if let prevChar = slice.last {
+          return isWordCharacter(prevChar)
+        }
+      }
+    }
+    return false
   }
 }

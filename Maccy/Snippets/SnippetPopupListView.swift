@@ -127,13 +127,17 @@ struct SnippetPopupListView: View {
     HStack(spacing: 6) {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 4) {
-          collectionPill(title: "Tất cả", count: store.items.count, isSelected: store.selectedPopupCollectionId == nil) {
+          collectionPill(
+            title: "Tất cả",
+            count: store.totalPopupEnabledItemCount,
+            isSelected: store.selectedPopupCollectionId == nil
+          ) {
             store.selectedPopupCollectionId = nil
           }
 
           ForEach(store.collections) { col in
-            let count = store.itemCount(in: col.id)
-            if count > 0 {
+            let count = store.enabledItemCount(in: col.id)
+            if col.isEnabled && count > 0 {
               collectionPill(
                 title: col.name,
                 count: count,

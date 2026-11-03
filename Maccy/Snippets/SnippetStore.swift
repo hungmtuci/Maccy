@@ -5,6 +5,19 @@ import Foundation
 import Logging
 import Observation
 
+enum SnippetStudioScope: Hashable, Sendable {
+  case all
+  case activeTriggers
+  case collection(UUID)
+}
+
+nonisolated struct SnippetDeduplicationSummary: Sendable {
+  var didMutate: Bool
+  var mergedCollectionsCount: Int
+  var removedDuplicateItemsCount: Int
+  var didFindTypinatorDefaultSet: Bool
+}
+
 nonisolated struct ActiveExpansionCandidate: Sendable {
   var item: SnippetItem
   var collection: SnippetCollection
@@ -17,6 +30,7 @@ private nonisolated struct SnippetSearchEntry: Sendable {
   var sourceCollectionUpdatedAt: Date
   var foldedName: String
   var foldedAbbreviation: String
+  var strippedFoldedAbbreviation: String
   var foldedCollectionName: String
   var foldedContent: String
   var singleLinePreview: String
@@ -35,12 +49,16 @@ class SnippetStore {
   private var allItems: [UUID: SnippetItem] = [:]
   @ObservationIgnored private var searchIndex: [UUID: SnippetSearchEntry] = [:]
   @ObservationIgnored private var itemCountsByCollection: [UUID: Int] = [:]
+  @ObservationIgnored private var enabledItemCountsByCollection: [UUID: Int] = [:]
+  @ObservationIgnored private var activeExpansionItemIds: Set<UUID> = []
   @ObservationIgnored private var immediateBuckets: [Character: [ActiveExpansionCandidate]] = [:]
   @ObservationIgnored private var delimiterBuckets: [Character: [ActiveExpansionCandidate]] = [:]
 
   private(set) var collections: [SnippetCollection] = []
   private(set) var items: [SnippetItem] = []
+  private(set) var activeExpansionItems: [SnippetItem] = []
   private(set) var activeExpansionCandidates: [ActiveExpansionCandidate] = []
+  private(set) var totalPopupEnabledItemCount: Int = 0
   private(set) var maxAbbreviationLength: Int = 24
   @ObservationIgnored private(set) var lastObservedCloudModificationDate: Date?
 
@@ -76,10 +94,22 @@ class SnippetStore {
     #endif
 
     loadFromLocalDisk()
+    let shouldSanitizeDefaultSet = !Defaults[.didSanitizeTypinatorDefaultSet]
+    let cleanupSummary = Self.deduplicateAndSanitize(
+      collections: &allCollections,
+      items: &allItems,
+      sanitizeTypinatorDefaultSet: shouldSanitizeDefaultSet
+    )
+    if shouldSanitizeDefaultSet && cleanupSummary.didFindTypinatorDefaultSet {
+      Defaults[.didSanitizeTypinatorDefaultSet] = true
+    }
+
     ensureDefaultCollectionIfNeeded(persist: false)
     rebuildCaches()
 
-    if Defaults[.cloudSyncEnabled] && !Defaults[.cloudSyncFolderPath].isEmpty {
+    if cleanupSummary.didMutate {
+      scheduleSaveAndSync()
+    } else if Defaults[.cloudSyncEnabled] {
       Task {
         await syncWithGoogleDrive()
       }
@@ -104,6 +134,14 @@ class SnippetStore {
 
   func itemCount(in collectionId: UUID) -> Int {
     itemCountsByCollection[collectionId] ?? 0
+  }
+
+  func enabledItemCount(in collectionId: UUID) -> Int {
+    enabledItemCountsByCollection[collectionId] ?? 0
+  }
+
+  func isActivelyExpanding(_ item: SnippetItem) -> Bool {
+    activeExpansionItemIds.contains(item.id)
   }
 
   func singleLinePreview(for item: SnippetItem) -> String {
@@ -159,28 +197,37 @@ class SnippetStore {
     return out
   }
 
-  func items(in collectionId: UUID?, searchQuery: String = "") -> [SnippetItem] {
+  func items(
+    for scope: SnippetStudioScope,
+    searchQuery: String = "",
+    searchAllCollectionsWhenQuerying: Bool = true
+  ) -> [SnippetItem] {
+    let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedScope: SnippetStudioScope = (!trimmed.isEmpty && searchAllCollectionsWhenQuerying) ? .all : scope
     let base: [SnippetItem]
-    if let collectionId {
-      base = items.filter { $0.collectionId == collectionId }
-    } else {
+    switch resolvedScope {
+    case .all:
       base = items
+    case .activeTriggers:
+      base = activeExpansionItems
+    case .collection(let collectionId):
+      base = items.filter { $0.collectionId == collectionId }
     }
-    return filterAndRank(base, query: searchQuery)
+    return filterAndRank(base, query: trimmed)
+  }
+
+  func items(in collectionId: UUID?, searchQuery: String = "") -> [SnippetItem] {
+    let scope: SnippetStudioScope = collectionId.map { .collection($0) } ?? .all
+    return items(for: scope, searchQuery: searchQuery, searchAllCollectionsWhenQuerying: false)
   }
 
   var filteredPopupItems: [SnippetItem] {
     let enabledCollectionIds = Set(collections.filter(\.isEnabled).map(\.id))
     let base: [SnippetItem]
-    if let selectedCol = selectedPopupCollectionId {
+    if let selectedCol = selectedPopupCollectionId, enabledCollectionIds.contains(selectedCol) {
       base = items.filter { $0.collectionId == selectedCol && $0.isEnabled }
     } else {
-      // Show items from enabled collections PLUS manual-only collections when searching in viewer
-      base = items.filter { item in
-        guard item.isEnabled else { return false }
-        if enabledCollectionIds.contains(item.collectionId) { return true }
-        return !popupSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      }
+      base = items.filter { $0.isEnabled && enabledCollectionIds.contains($0.collectionId) }
     }
     return filterAndRank(base, query: popupSearchQuery)
   }
@@ -188,12 +235,9 @@ class SnippetStore {
   private func filterAndRank(_ candidates: [SnippetItem], query: String) -> [SnippetItem] {
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
-      return candidates.sorted { lhs, rhs in
-        if lhs.usageCount != rhs.usageCount {
-          return lhs.usageCount > rhs.usageCount
-        }
-        return lhs.displayTitle.localizedStandardCompare(rhs.displayTitle) == .orderedAscending
-      }
+      // `items` and `activeExpansionItems` are already deterministically sorted by
+      // effectiveAbbreviation (A→Z) first, followed by manual snippets by displayTitle (A→Z).
+      return candidates
     }
 
     let foldedQuery = trimmed.foldingVietnameseDiacritics
@@ -209,6 +253,7 @@ class SnippetStore {
       // All query tokens must appear somewhere across (abbreviation, name, collectionName, content)
       let allMatch = queryTokens.allSatisfy { token in
         idx.foldedAbbreviation.contains(token)
+          || idx.strippedFoldedAbbreviation.contains(token)
           || idx.foldedName.contains(token)
           || idx.foldedCollectionName.contains(token)
           || idx.foldedContent.contains(token)
@@ -217,31 +262,40 @@ class SnippetStore {
 
       var score = 0
       if idx.foldedAbbreviation == foldedQuery {
-        score += 1_000
-      } else if idx.foldedAbbreviation.hasPrefix(foldedQuery) {
-        score += 650
+        score += 2_000
+      } else if !idx.strippedFoldedAbbreviation.isEmpty && idx.strippedFoldedAbbreviation == foldedQuery {
+        score += 1_650
+      } else if idx.foldedAbbreviation.hasPrefix(foldedQuery)
+                  || (!idx.strippedFoldedAbbreviation.isEmpty && idx.strippedFoldedAbbreviation.hasPrefix(foldedQuery)) {
+        score += 1_100
       } else if idx.foldedAbbreviation.contains(foldedQuery) {
-        score += 400
+        score += 650
       }
 
       if idx.foldedName == foldedQuery {
-        score += 800
+        score += 900
       } else if idx.foldedName.hasPrefix(foldedQuery) {
-        score += 500
+        score += 550
       } else if idx.foldedName.contains(foldedQuery) {
-        score += 300
+        score += 320
       }
 
+      if idx.foldedCollectionName.contains(foldedQuery) {
+        score += 200
+      }
       if idx.foldedContent.contains(foldedQuery) {
         score += 120
       }
-      score += min(item.usageCount, 50)
+      if activeExpansionItemIds.contains(item.id) {
+        score += 40
+      }
+      score += min(item.usageCount, 30)
       scored.append((item, score))
     }
 
     scored.sort { lhs, rhs in
       if lhs.score != rhs.score { return lhs.score > rhs.score }
-      return lhs.item.displayTitle.localizedStandardCompare(rhs.item.displayTitle) == .orderedAscending
+      return Self.compareItemsForDisplay(lhs.item, rhs.item, colMap: allCollections)
     }
     return scored.map(\.item)
   }
@@ -433,6 +487,9 @@ class SnippetStore {
        let col = allCollections[copy.collectionId],
        let itemIdx = items.firstIndex(where: { $0.id == copy.id }) {
       items[itemIdx] = copy
+      if let actIdx = activeExpansionItems.firstIndex(where: { $0.id == copy.id }) {
+        activeExpansionItems[actIdx] = copy
+      }
       let effAbbr = copy.effectiveAbbreviation(in: col)
       searchIndex[copy.id] = Self.buildSearchEntry(for: copy, collection: col, effectiveAbbreviation: effAbbr)
       if let candIdx = activeExpansionCandidates.firstIndex(where: { $0.item.id == copy.id }) {
@@ -482,6 +539,9 @@ class SnippetStore {
     allItems[itemId] = target
     if let idx = items.firstIndex(where: { $0.id == itemId }) {
       items[idx] = target
+    }
+    if let actIdx = activeExpansionItems.firstIndex(where: { $0.id == itemId }) {
+      activeExpansionItems[actIdx] = target
     }
     if var existingEntry = searchIndex[itemId] {
       existingEntry.sourceItemUpdatedAt = now
@@ -533,7 +593,7 @@ class SnippetStore {
     )
   }
 
-  // MARK: - Deduplicated Batch Import (Alfred, Typinator, CSV, JSON, Starter Packs)
+  // MARK: - Deduplicated Batch Import & Store Sanitization
 
   func importPayload(_ payload: SnippetImportPayload) -> SnippetImportSummary {
     var colsAdded = 0
@@ -543,8 +603,13 @@ class SnippetStore {
 
     for importedCol in payload.collections {
       let trimmedColName = importedCol.name.trimmingCharacters(in: .whitespacesAndNewlines)
+      let liveCollections = allCollections.values.filter { !$0.isDeleted }
       let targetCol: SnippetCollection
-      if let existing = collections.first(where: { $0.name.caseInsensitiveCompare(trimmedColName) == .orderedSame }) {
+      if let existing = liveCollections.first(where: {
+        $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(trimmedColName) == .orderedSame
+          && ($0.keywordPrefix == importedCol.keywordPrefix || $0.keywordPrefix.isEmpty || importedCol.keywordPrefix.isEmpty)
+          && ($0.keywordSuffix == importedCol.keywordSuffix || $0.keywordSuffix.isEmpty || importedCol.keywordSuffix.isEmpty)
+      }) {
         var updatedCol = existing
         if updatedCol.keywordPrefix.isEmpty && !importedCol.keywordPrefix.isEmpty {
           updatedCol.keywordPrefix = importedCol.keywordPrefix
@@ -556,7 +621,7 @@ class SnippetStore {
         allCollections[updatedCol.id] = updatedCol
         targetCol = updatedCol
       } else {
-        let nextOrder = (allCollections.values.filter { !$0.isDeleted }.map(\.sortOrder).max() ?? -1) + 1
+        let nextOrder = (liveCollections.map(\.sortOrder).max() ?? -1) + 1
         let created = SnippetCollection(
           name: trimmedColName.isEmpty ? "Imported" : trimmedColName,
           icon: importedCol.icon,
@@ -626,6 +691,16 @@ class SnippetStore {
       }
     }
 
+    let shouldSanitizeDefaultSet = !Defaults[.didSanitizeTypinatorDefaultSet]
+    let cleanupSummary = Self.deduplicateAndSanitize(
+      collections: &allCollections,
+      items: &allItems,
+      sanitizeTypinatorDefaultSet: shouldSanitizeDefaultSet
+    )
+    if shouldSanitizeDefaultSet && cleanupSummary.didFindTypinatorDefaultSet {
+      Defaults[.didSanitizeTypinatorDefaultSet] = true
+    }
+
     rebuildCaches()
     scheduleSaveAndSync()
     return SnippetImportSummary(
@@ -633,6 +708,175 @@ class SnippetStore {
       snippetsImported: itemsAdded,
       snippetsUpdated: itemsUpdated,
       sourceDescription: payload.sourceDescription
+    )
+  }
+
+  @discardableResult
+  func deduplicateAndSanitizeNow() -> SnippetDeduplicationSummary {
+    let summary = Self.deduplicateAndSanitize(
+      collections: &allCollections,
+      items: &allItems,
+      sanitizeTypinatorDefaultSet: false
+    )
+    if summary.didMutate {
+      rebuildCaches()
+      scheduleSaveAndSync()
+    }
+    return summary
+  }
+
+  /// Deterministically merges duplicate collections (e.g., 3x Typinator `Default Set` or duplicate imports across Macs),
+  /// deduplicates identical active items within each collection, and optionally performs one-time sanitization of
+  /// Typinator's factory demo `Default Set` (`dt` → `{{isodate}}`).
+  nonisolated static func deduplicateAndSanitize(
+    collections: inout [UUID: SnippetCollection],
+    items: inout [UUID: SnippetItem],
+    sanitizeTypinatorDefaultSet: Bool
+  ) -> SnippetDeduplicationSummary {
+    let now = Date.now
+    var didMutate = false
+    var mergedColsCount = 0
+    var removedDupItemsCount = 0
+    var didFindDefaultSet = false
+
+    // 1. Coalesce active collections sharing the same canonical `(name, keywordPrefix, keywordSuffix)`
+    var groupsByKey: [String: [SnippetCollection]] = [:]
+    for col in collections.values where !col.isDeleted {
+      let cleanName = col.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      let key = "\(cleanName)|\(col.keywordPrefix)|\(col.keywordSuffix)"
+      groupsByKey[key, default: []].append(col)
+    }
+
+    var movedFromDuplicateCollectionIds = Set<UUID>()
+    for (_, group) in groupsByKey where group.count > 1 {
+      let sortedGroup = group.sorted { lhs, rhs in
+        if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+        return lhs.id.uuidString < rhs.id.uuidString
+      }
+      var winner = sortedGroup[0]
+      let minOrder = sortedGroup.map(\.sortOrder).min() ?? winner.sortOrder
+      if winner.sortOrder != minOrder {
+        winner.sortOrder = minOrder
+        winner.updatedAt = now
+        collections[winner.id] = winner
+      }
+
+      for var dupCol in sortedGroup.dropFirst() {
+        movedFromDuplicateCollectionIds.insert(dupCol.id)
+        for (itemId, var item) in items where !item.isDeleted && item.collectionId == dupCol.id {
+          item.collectionId = winner.id
+          item.updatedAt = now
+          items[itemId] = item
+        }
+        dupCol.isDeleted = true
+        dupCol.updatedAt = now
+        collections[dupCol.id] = dupCol
+        mergedColsCount += 1
+        didMutate = true
+      }
+    }
+
+    // 2. Deduplicate active items within each active collection
+    var activeItemsByCol: [UUID: [SnippetItem]] = [:]
+    for item in items.values where !item.isDeleted && collections[item.collectionId]?.isDeleted == false {
+      activeItemsByCol[item.collectionId, default: []].append(item)
+    }
+
+    for (colId, colItems) in activeItemsByCol where colItems.count > 1 {
+      let ordered = colItems.sorted { lhs, rhs in
+        if lhs.isEnabled != rhs.isEnabled { return lhs.isEnabled && !rhs.isEnabled }
+        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        if lhs.usageCount != rhs.usageCount { return lhs.usageCount > rhs.usageCount }
+        return lhs.id.uuidString < rhs.id.uuidString
+      }
+
+      var winnerByAbbr: [String: UUID] = [:]
+      var winnerByManualKey: [String: UUID] = [:]
+
+      for candidate in ordered {
+        let cleanAbbr = candidate.abbreviation.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanAbbr.isEmpty {
+          let abbrKey = candidate.caseMode == .caseSensitive
+            ? "cs:\(cleanAbbr)"
+            : "ci:\(cleanAbbr.lowercased())"
+          if let winId = winnerByAbbr[abbrKey], var winItem = items[winId] {
+            let sameContent = winItem.content.trimmingCharacters(in: .whitespacesAndNewlines)
+              == candidate.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if sameContent || !movedFromDuplicateCollectionIds.isEmpty {
+              if candidate.usageCount > winItem.usageCount {
+                winItem.usageCount = candidate.usageCount
+                winItem.updatedAt = now
+                items[winId] = winItem
+              }
+              var dup = candidate
+              dup.isDeleted = true
+              dup.updatedAt = now
+              items[dup.id] = dup
+              removedDupItemsCount += 1
+              didMutate = true
+            }
+          } else {
+            winnerByAbbr[abbrKey] = candidate.id
+          }
+        } else {
+          let cleanName = candidate.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+          guard !cleanName.isEmpty || !candidate.content.isEmpty else { continue }
+          let manualKey = "\(colId.uuidString)|\(cleanName)|\(candidate.content)"
+          if let winId = winnerByManualKey[manualKey], var winItem = items[winId] {
+            if candidate.usageCount > winItem.usageCount {
+              winItem.usageCount = candidate.usageCount
+              winItem.updatedAt = now
+              items[winId] = winItem
+            }
+            var dup = candidate
+            dup.isDeleted = true
+            dup.updatedAt = now
+            items[dup.id] = dup
+            removedDupItemsCount += 1
+            didMutate = true
+          } else {
+            winnerByManualKey[manualKey] = candidate.id
+          }
+        }
+      }
+    }
+
+    // 3. Sanitize Typinator's bundled demo `Default Set` (`dt` → `{{isodate}}`) so short demo words
+    //    do not unexpectedly expand inside normal Vietnamese/English typing (`sdt` → `s2026-11-03`).
+    for (colId, var col) in collections where !col.isDeleted {
+      let cleanColName = col.name.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard cleanColName.caseInsensitiveCompare("Default Set") == .orderedSame else { continue }
+      didFindDefaultSet = true
+
+      if sanitizeTypinatorDefaultSet {
+        if col.isEnabled {
+          col.isEnabled = false
+          col.updatedAt = now
+          collections[colId] = col
+          didMutate = true
+        }
+        for (itemId, var item) in items where !item.isDeleted && item.collectionId == colId {
+          let cleanAbbr = item.abbreviation.trimmingCharacters(in: .whitespacesAndNewlines)
+          if !cleanAbbr.isEmpty && cleanAbbr.allSatisfy(\.isLetter) {
+            if !item.wholeWord || item.triggerMode == .immediate {
+              item.wholeWord = true
+              if item.triggerMode == .immediate {
+                item.triggerMode = .afterDelimiter
+              }
+              item.updatedAt = now
+              items[itemId] = item
+              didMutate = true
+            }
+          }
+        }
+      }
+    }
+
+    return SnippetDeduplicationSummary(
+      didMutate: didMutate,
+      mergedCollectionsCount: mergedColsCount,
+      removedDuplicateItemsCount: removedDupItemsCount,
+      didFindTypinatorDefaultSet: didFindDefaultSet
     )
   }
 
@@ -658,17 +902,44 @@ class SnippetStore {
     return def
   }
 
+  private nonisolated static func compareItemsForDisplay(
+    _ lhs: SnippetItem,
+    _ rhs: SnippetItem,
+    colMap: [UUID: SnippetCollection]
+  ) -> Bool {
+    let lAbbr = lhs.effectiveAbbreviation(in: colMap[lhs.collectionId])
+    let rAbbr = rhs.effectiveAbbreviation(in: colMap[rhs.collectionId])
+    // Always place snippets with an actual abbreviation ahead of manual-only templates (`—`)
+    if lAbbr.isEmpty != rAbbr.isEmpty {
+      return !lAbbr.isEmpty
+    }
+    if !lAbbr.isEmpty {
+      let abbrCmp = lAbbr.localizedStandardCompare(rAbbr)
+      if abbrCmp != .orderedSame {
+        return abbrCmp == .orderedAscending
+      }
+    }
+    let titleCmp = lhs.displayTitle.localizedStandardCompare(rhs.displayTitle)
+    if titleCmp != .orderedSame {
+      return titleCmp == .orderedAscending
+    }
+    return lhs.id.uuidString < rhs.id.uuidString
+  }
+
   private nonisolated static func buildSearchEntry(
     for item: SnippetItem,
     collection: SnippetCollection,
     effectiveAbbreviation: String
   ) -> SnippetSearchEntry {
     let contentSample = item.content.shortened(to: 8_192)
+    let foldedAbbr = effectiveAbbreviation.foldingVietnameseDiacritics
+    let strippedAbbr = String(foldedAbbr.drop(while: { !$0.isLetter && !$0.isNumber }))
     return SnippetSearchEntry(
       sourceItemUpdatedAt: item.updatedAt,
       sourceCollectionUpdatedAt: collection.updatedAt,
       foldedName: item.displayTitle.foldingVietnameseDiacritics,
-      foldedAbbreviation: effectiveAbbreviation.foldingVietnameseDiacritics,
+      foldedAbbreviation: foldedAbbr,
+      strippedFoldedAbbreviation: strippedAbbr,
       foldedCollectionName: collection.name.foldingVietnameseDiacritics,
       foldedContent: contentSample.foldingVietnameseDiacritics,
       singleLinePreview: makeSingleLinePreview(item.content)
@@ -707,12 +978,7 @@ class SnippetStore {
     let activeItems = allItems.values
       .filter { !$0.isDeleted && colMap[$0.collectionId] != nil }
       .sorted { lhs, rhs in
-        let lAbbr = lhs.effectiveAbbreviation(in: colMap[lhs.collectionId])
-        let rAbbr = rhs.effectiveAbbreviation(in: colMap[rhs.collectionId])
-        if !lAbbr.isEmpty && !rAbbr.isEmpty && lAbbr != rAbbr {
-          return lAbbr.localizedStandardCompare(rAbbr) == .orderedAscending
-        }
-        return lhs.displayTitle.localizedStandardCompare(rhs.displayTitle) == .orderedAscending
+        Self.compareItemsForDisplay(lhs, rhs, colMap: colMap)
       }
     self.items = activeItems
 
@@ -722,13 +988,24 @@ class SnippetStore {
 
     var counts: [UUID: Int] = [:]
     counts.reserveCapacity(activeCols.count)
+    var enabledCounts: [UUID: Int] = [:]
+    enabledCounts.reserveCapacity(activeCols.count)
+    var totalPopupEnabled = 0
 
     var newCandidates: [ActiveExpansionCandidate] = []
+    var orderedActiveItems: [SnippetItem] = []
+    var activeIds = Set<UUID>()
     var longest = 16
 
     for item in activeItems {
       guard let col = colMap[item.collectionId] else { continue }
       counts[col.id, default: 0] += 1
+      if item.isEnabled {
+        enabledCounts[col.id, default: 0] += 1
+        if col.isEnabled {
+          totalPopupEnabled += 1
+        }
+      }
       let effAbbr = item.effectiveAbbreviation(in: col)
 
       // Reuse pre-folded Vietnamese search entry if neither item nor parent collection changed
@@ -742,6 +1019,8 @@ class SnippetStore {
 
       if col.isEnabled && item.isEnabled && item.triggerMode != .manualOnly && !effAbbr.isEmpty {
         longest = max(longest, effAbbr.count)
+        orderedActiveItems.append(item)
+        activeIds.insert(item.id)
         newCandidates.append(
           ActiveExpansionCandidate(
             item: item,
@@ -753,7 +1032,7 @@ class SnippetStore {
       }
     }
 
-    // Priority order: longer abbreviation first so `;p001` wins over `;p0` if any, then collection sortOrder
+    // Priority order for keyboard matching: longer abbreviation first so `;p001` wins over `;p0`, then collection sortOrder
     newCandidates.sort { lhs, rhs in
       if lhs.effectiveAbbreviation.count != rhs.effectiveAbbreviation.count {
         return lhs.effectiveAbbreviation.count > rhs.effectiveAbbreviation.count
@@ -762,11 +1041,20 @@ class SnippetStore {
     }
 
     self.itemCountsByCollection = counts
+    self.enabledItemCountsByCollection = enabledCounts
+    self.totalPopupEnabledItemCount = totalPopupEnabled
     self.searchIndex = newSearchIndex
+    self.activeExpansionItems = orderedActiveItems
+    self.activeExpansionItemIds = activeIds
     self.activeExpansionCandidates = newCandidates
     self.maxAbbreviationLength = min(max(longest + 2, 24), 128)
     rebuildExpansionBuckets(from: newCandidates)
-    ensureValidPopupSelection()
+
+    if let selectedCol = selectedPopupCollectionId, colMap[selectedCol]?.isEnabled != true {
+      selectedPopupCollectionId = nil
+    } else {
+      ensureValidPopupSelection()
+    }
   }
 
   // MARK: - Local Disk Persistence & Two-Way Google Drive Sync
@@ -796,7 +1084,7 @@ class SnippetStore {
       guard !Task.isCancelled else { return }
 
       await Self.writeLocalSnapshot(collections: snapshotCollections, items: snapshotItems)
-      if Defaults[.cloudSyncEnabled] && !Defaults[.cloudSyncFolderPath].isEmpty {
+      if Defaults[.cloudSyncEnabled] {
         await self?.syncWithGoogleDrive()
       }
     }
@@ -826,7 +1114,11 @@ class SnippetStore {
 
   func syncWithGoogleDrive() async {
     guard Defaults[.cloudSyncEnabled] else { return }
-    let folderPath = Defaults[.cloudSyncFolderPath].trimmingCharacters(in: .whitespacesAndNewlines)
+    var folderPath = Defaults[.cloudSyncFolderPath].trimmingCharacters(in: .whitespacesAndNewlines)
+    if folderPath.isEmpty {
+      folderPath = (CloudSyncManager.shared.autoDetectGoogleDriveIfNeeded() ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     guard !folderPath.isEmpty, !isSyncingSnippets else { return }
 
     isSyncingSnippets = true
@@ -839,8 +1131,9 @@ class SnippetStore {
     let encryptionEnabled = Defaults[.cloudSyncEncryptionEnabled]
     let passphrase = Defaults[.cloudSyncPassphrase].trimmingCharacters(in: .whitespacesAndNewlines)
     let deviceName = Host.current().localizedName ?? "Mac"
+    let shouldSanitizeDefaultSet = !Defaults[.didSanitizeTypinatorDefaultSet]
 
-    let mergedOutcome = await Task.detached(priority: .utility) { () -> (SnippetSyncDatabase, Bool, Date?)? in
+    let mergedOutcome = await Task.detached(priority: .utility) { () -> (SnippetSyncDatabase, Bool, Bool, Date?)? in
       try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
 
       let key: SymmetricKey? = (encryptionEnabled && !passphrase.isEmpty)
@@ -867,8 +1160,16 @@ class SnippetStore {
       var primaryRemoteDB: SnippetSyncDatabase?
 
       for url in candidateURLs where FileManager.default.fileExists(atPath: url.path) {
+        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        let existingSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
         guard let rawData = try? Data(contentsOf: url),
               let remoteDB = try? decoder.decode(SnippetSyncDatabase.self, from: rawData) else {
+          // CRITICAL SAFETY GUARD: If the primary cloud file exists and is non-empty, but reading or decoding
+          // failed (e.g. Google Drive File Provider streaming timeout while offline), abort this sync pass
+          // instead of treating `primaryRemoteDB` as nil and overwriting remote data!
+          if url == primaryURL && existingSize > 2 {
+            return nil
+          }
           continue
         }
         if url == primaryURL {
@@ -903,13 +1204,23 @@ class SnippetStore {
         }
       }
 
+      // Deduplicate any same-named collections imported independently across Macs + sanitize demo Default Set
+      let dedupSummary = Self.deduplicateAndSanitize(
+        collections: &mergedCols,
+        items: &mergedItems,
+        sanitizeTypinatorDefaultSet: shouldSanitizeDefaultSet
+      )
+      if dedupSummary.didMutate {
+        localChangedFromRemote = true
+      }
+
       // Prune tombstones older than 30 days
       let tombstoneCutoff = Date.now.addingTimeInterval(-30 * 86_400)
       mergedCols = mergedCols.filter { !$0.value.isDeleted || $0.value.updatedAt >= tombstoneCutoff }
       mergedItems = mergedItems.filter { !$0.value.isDeleted || $0.value.updatedAt >= tombstoneCutoff }
 
       // Determine whether Google Drive file actually needs to be written (avoids two-Mac ping-pong uploads)
-      var remoteNeedsWrite = (primaryRemoteDB == nil) || (candidateURLs.count > 1)
+      var remoteNeedsWrite = (primaryRemoteDB == nil) || (candidateURLs.count > 1) || dedupSummary.didMutate
       if !remoteNeedsWrite, let primary = primaryRemoteDB {
         if primary.collections.count != mergedCols.count || primary.items.count != mergedItems.count {
           remoteNeedsWrite = true
@@ -971,10 +1282,13 @@ class SnippetStore {
         collections: mergedCols,
         items: mergedItems
       )
-      return (plainMergedDB, localChangedFromRemote, observedModDate)
+      return (plainMergedDB, localChangedFromRemote, dedupSummary.didFindTypinatorDefaultSet, observedModDate)
     }.value
 
-    if let (mergedPlainDB, changedFromRemote, modDate) = mergedOutcome {
+    if let (mergedPlainDB, changedFromRemote, didFindDefaultSet, modDate) = mergedOutcome {
+      if shouldSanitizeDefaultSet && didFindDefaultSet {
+        Defaults[.didSanitizeTypinatorDefaultSet] = true
+      }
       if let modDate {
         self.lastObservedCloudModificationDate = modDate
       }
