@@ -474,6 +474,7 @@ nonisolated enum SnippetImporter {
       .replacingOccurrences(of: "{key:Enter}", with: "{{enter}}")
       .replacingOccurrences(of: "{key:Esc}", with: "{{esc}}")
       .replacingOccurrences(of: "{YYYY}-{MM}-{DD}", with: "{{isodate}}")
+      .replacingOccurrences(of: "{YYYY}{MM}{DD}", with: "{{date:yyyyMMdd}}")
       .replacingOccurrences(of: "{DD}/{MM}/{YYYY}", with: "{{date:dd/MM/yyyy}}")
   }
 

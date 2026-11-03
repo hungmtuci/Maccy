@@ -1116,7 +1116,11 @@ struct SnippetStudioView: View {
           )
         }
 
-        if showLivePreviewBox {
+        let shouldAutoPreview = selected.content.contains("{{")
+          || selected.content.contains("{date")
+          || selected.content.contains("{YYYY}")
+          || selected.content.contains("%Y")
+        if showLivePreviewBox || shouldAutoPreview {
           let previewStr = SnippetTemplateEngine.renderLivePreview(
             for: selected,
             fillInValues: [:],
@@ -1128,11 +1132,14 @@ struct SnippetStudioView: View {
               .foregroundStyle(Color.accentColor)
               .font(.caption)
               .padding(.top, 2)
-            Text(previewStr.isEmpty ? "(Trống)" : previewStr)
-              .font(.system(size: 12))
-              .lineLimit(3)
-              .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Xem trước: ")
+              .font(.system(size: 12, weight: .semibold))
+              .foregroundStyle(.secondary)
+            + Text(previewStr.isEmpty ? "(Trống)" : previewStr)
+              .font(.system(size: 12, weight: .medium))
           }
+          .lineLimit(3)
+          .frame(maxWidth: .infinity, alignment: .leading)
           .padding(8)
           .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -1176,14 +1183,23 @@ struct SnippetStudioView: View {
       }
 
       Menu("Ngày & Giờ tự động") {
+        Button("Ngày viết liền (yyyyMMdd — VD: 20261103)") {
+          appendToken("{{date:yyyyMMdd}}", to: selected)
+        }
+        Button("Ngày giờ viết liền (yyyyMMdd_HHmm)") {
+          appendToken("{{date:yyyyMMdd_HHmm}}", to: selected)
+        }
         Button("Ngày hôm nay (dd/MM/yyyy)") {
           appendToken("{{date:dd/MM/yyyy}}", to: selected)
         }
         Button("Ngày chuẩn ISO (yyyy-MM-dd)") {
           appendToken("{{isodate}}", to: selected)
         }
-        Button("Ngày & Giờ hiện tại") {
+        Button("Ngày & Giờ hiện tại (dd/MM/yyyy HH:mm)") {
           appendToken("{{datetime}}", to: selected)
+        }
+        Button("Giờ hiện tại (HH:mm:ss)") {
+          appendToken("{{time:HH:mm:ss}}", to: selected)
         }
         Divider()
         Button("+3 Ngày làm việc (bỏ T7, CN)") {
@@ -1192,7 +1208,10 @@ struct SnippetStudioView: View {
         Button("+5 Ngày làm việc (bỏ T7, CN)") {
           appendToken("{{date +5bd:dd/MM/yyyy}}", to: selected)
         }
-        Button("+7 Ngày lịch") {
+        Button("-1 Ngày hôm qua (yyyyMMdd)") {
+          appendToken("{{date -1d:yyyyMMdd}}", to: selected)
+        }
+        Button("+7 Ngày lịch (dd/MM/yyyy)") {
           appendToken("{{date +7d:dd/MM/yyyy}}", to: selected)
         }
         Button("-1 Tháng trước (MM/yyyy)") {

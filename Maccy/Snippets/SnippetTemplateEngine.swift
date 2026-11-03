@@ -25,7 +25,10 @@ nonisolated enum SnippetTemplateEngine {
     pattern: "\\{\\{random:([0-9]+)-([0-9]+)\\}\\}"
   )
   private static let dateMacroRegex = try? NSRegularExpression(
-    pattern: "\\{\\{?(date|time|datetime|isodate)(?:\\s*([+-]\\d+\\s*(?:bd|d|w|M|m|y|h)))?(?::([^\\}]+))?\\}?\\}"
+    pattern: "\\{\\{?(date|time|datetime|isodate|compactdate)(?:\\s*([+-]\\d+\\s*(?:bd|BD|d|D|w|W|M|m|y|Y|h|H)))?(?::([^\\}]+))?\\}?\\}"
+  )
+  private static let directDateFormatRegex = try? NSRegularExpression(
+    pattern: "\\{\\{([yYmMdDHhsS][yYmMdDHhsS\\-/_.: ]{3,30})\\}\\}"
   )
   private static let inlineScriptRegex = try? NSRegularExpression(
     pattern: "\\{\\{(shell|applescript|jxa):([\\s\\S]*?)\\}\\}"
@@ -352,8 +355,8 @@ nonisolated enum SnippetTemplateEngine {
 
     // Double-brace & Alfred single-brace date/time macros:
     // Examples:
-    //   {{date}}, {{time}}, {{datetime}}, {{isodate}}
-    //   {{date +5bd}}, {{date +5bd:dd/MM/yyyy}}, {{date -2d:yyyy-MM-dd}}, {date:dd/MM/yyyy}
+    //   {{date}}, {{time}}, {{datetime}}, {{isodate}}, {{compactdate}}
+    //   {{date:yyyyMMdd}}, {{date:yyyyMMDD}}, {{date +5bd:dd/MM/yyyy}}, {date:yyyyMMdd}
     if result.contains("{") && (result.contains("date") || result.contains("time")),
        let regex = dateMacroRegex {
       let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
@@ -380,12 +383,13 @@ nonisolated enum SnippetTemplateEngine {
           let targetDate = applyDateMath(to: now, spec: offsetSpec)
           let format: String
           if let customFormat, !customFormat.isEmpty {
-            format = customFormat
+            format = normalizeDateFormat(customFormat)
           } else {
             switch kind {
             case "time": format = "HH:mm"
             case "datetime": format = "dd/MM/yyyy HH:mm"
             case "isodate": format = "yyyy-MM-dd"
+            case "compactdate": format = "yyyyMMdd"
             default: format = "dd/MM/yyyy"
             }
           }
@@ -393,6 +397,47 @@ nonisolated enum SnippetTemplateEngine {
           result.replaceSubrange(fullRange, with: formatter.string(from: targetDate))
         }
       }
+    }
+
+    // Direct format shorthand inside double braces without `date:` prefix:
+    // Examples: `{{yyyyMMdd}}`, `{{yyyyMMDD}}`, `{{YYYYMMDD}}`, `{{dd/MM/yyyy}}`, `{{yyyyMMdd_HHmm}}`
+    if result.contains("{{"), let directRegex = directDateFormatRegex {
+      let matches = directRegex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
+      if !matches.isEmpty {
+        let formatter = DateFormatter()
+        formatter.locale = vietnameseLocale
+        for match in matches {
+          guard let fullRange = Range(match.range(at: 0), in: result),
+                let fmtRange = Range(match.range(at: 1), in: result) else { continue }
+          let rawFmt = String(result[fmtRange]).trimmingCharacters(in: .whitespaces)
+          formatter.dateFormat = normalizeDateFormat(rawFmt)
+          result.replaceSubrange(fullRange, with: formatter.string(from: now))
+        }
+      }
+    }
+
+    // Typinator standalone date/time tokens: `{YYYY}`, `{YY}`, `{MM}`, `{DD}`, `{hh}`, `{h024}`, `{mm}`, `{ss}`
+    // Example: `{YYYY}{MM}{DD}` -> `20261103`
+    if result.contains("{YYYY}") || result.contains("{YY}") || result.contains("{MM}")
+        || result.contains("{DD}") || result.contains("{hh}") || result.contains("{h024}")
+        || result.contains("{mm}") || result.contains("{ss}") {
+      let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
+      let year4 = String(format: "%04d", comps.year ?? 2026)
+      let year2 = String(year4.suffix(2))
+      let month2 = String(format: "%02d", comps.month ?? 1)
+      let day2 = String(format: "%02d", comps.day ?? 1)
+      let hour2 = String(format: "%02d", comps.hour ?? 0)
+      let min2 = String(format: "%02d", comps.minute ?? 0)
+      let sec2 = String(format: "%02d", comps.second ?? 0)
+      result = result
+        .replacingOccurrences(of: "{YYYY}", with: year4)
+        .replacingOccurrences(of: "{YY}", with: year2)
+        .replacingOccurrences(of: "{MM}", with: month2)
+        .replacingOccurrences(of: "{DD}", with: day2)
+        .replacingOccurrences(of: "{hh}", with: hour2)
+        .replacingOccurrences(of: "{h024}", with: hour2)
+        .replacingOccurrences(of: "{mm}", with: min2)
+        .replacingOccurrences(of: "{ss}", with: sec2)
     }
 
     // Legacy TextExpander strftime-style tokens (%Y, %m, %d, %H, %M, %S)
@@ -409,6 +454,58 @@ nonisolated enum SnippetTemplateEngine {
     }
 
     return result
+  }
+
+  /// Normalizes user-written date format patterns so common human conventions (`yyyyMMDD`, `YYYYMMDD`, `yyyymmdd`,
+  /// `DD/MM/YYYY`) produce day-of-month (`dd`) and calendar year (`yyyy`) instead of ICU day-of-year (`DD` = 001..366)
+  /// or ISO week-year (`YYYY`).
+  static func normalizeDateFormat(_ rawFormat: String) -> String {
+    guard !rawFormat.isEmpty else { return rawFormat }
+
+    var hasTimeTokens = false
+    var hasDateTokens = false
+    var inQuotes = false
+    for ch in rawFormat {
+      if ch == "'" {
+        inQuotes.toggle()
+        continue
+      }
+      guard !inQuotes else { continue }
+      if ch == "H" || ch == "h" || ch == "s" || ch == "S" || ch == "k" || ch == "K" {
+        hasTimeTokens = true
+      }
+      if ch == "y" || ch == "Y" || ch == "d" || ch == "D" {
+        hasDateTokens = true
+      }
+    }
+
+    var out = ""
+    out.reserveCapacity(rawFormat.count)
+    inQuotes = false
+    let convertLowerMToMonth = hasDateTokens && !hasTimeTokens
+
+    for ch in rawFormat {
+      if ch == "'" {
+        inQuotes.toggle()
+        out.append(ch)
+        continue
+      }
+      if inQuotes {
+        out.append(ch)
+        continue
+      }
+      switch ch {
+      case "Y":
+        out.append("y")
+      case "D":
+        out.append("d")
+      case "m" where convertLowerMToMonth:
+        out.append("M")
+      default:
+        out.append(ch)
+      }
+    }
+    return out
   }
 
   /// Supports calendar offsets (`+3d`, `-2w`, `+1M`, `+1y`, `+4h`) and Business Days (`+5bd`, `-3bd` skipping Sat/Sun).
