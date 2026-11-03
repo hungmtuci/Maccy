@@ -78,7 +78,7 @@ final class SoftwareUpdater {
   }
 
   var currentVersionString: String {
-    (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "3.1.2-custom"
+    (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "3.1.3-custom"
   }
 
   func checkForUpdates() {
@@ -160,23 +160,46 @@ final class SoftwareUpdater {
     AppState.shared.popup.close()
 
     if let existing = updateWindow {
+      clampWindowFrameToVisibleScreen(existing)
       NSApp.activate(ignoringOtherApps: true)
       existing.makeKeyAndOrderFront(nil)
       return
     }
 
-    let hosting = NSHostingController(rootView: GitHubUpdateSheetView(updater: self))
-    let win = NSWindow(contentViewController: hosting)
+    let hostingView = NSHostingView(rootView: GitHubUpdateSheetView(updater: self))
+    hostingView.sizingOptions = []
+
+    let defaultRect = NSRect(x: 0, y: 0, width: 560, height: 430)
+    let win = NSWindow(
+      contentRect: defaultRect,
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered,
+      defer: false
+    )
     win.title = "Cập nhật phần mềm Maccy"
-    win.styleMask = [.titled, .closable]
-    win.setContentSize(NSSize(width: 540, height: 370))
+    win.contentView = hostingView
+    win.minSize = NSSize(width: 480, height: 340)
     win.isReleasedWhenClosed = false
-    win.center()
     win.level = .floating
+    clampWindowFrameToVisibleScreen(win)
+    win.center()
 
     self.updateWindow = win
     NSApp.activate(ignoringOtherApps: true)
     win.makeKeyAndOrderFront(nil)
+  }
+
+  private func clampWindowFrameToVisibleScreen(_ window: NSWindow) {
+    guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+    var frame = window.frame
+    let maxW = max(480, visible.width - 48)
+    let maxH = max(340, visible.height - 64)
+    if frame.width > maxW || frame.height > maxH {
+      frame.size.width = min(frame.width, maxW)
+      frame.size.height = min(frame.height, maxH)
+      window.setFrame(frame, display: true)
+      window.center()
+    }
   }
 
   func dismissUpdateWindow() {
@@ -515,12 +538,12 @@ private struct GitHubUpdateSheetView: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
+    VStack(alignment: .leading, spacing: 12) {
       HStack(alignment: .top, spacing: 14) {
         Image(nsImage: NSApp.applicationIconImage)
           .resizable()
           .interpolation(.high)
-          .frame(width: 60, height: 60)
+          .frame(width: 56, height: 56)
 
         VStack(alignment: .leading, spacing: 4) {
           Text("Có bản cập nhật mới cho Maccy!")
@@ -532,21 +555,19 @@ private struct GitHubUpdateSheetView: View {
             .fixedSize(horizontal: false, vertical: true)
         }
       }
+      .fixedSize(horizontal: false, vertical: true)
 
-      Text(" Điểm mới trong phiên bản này:")
+      Text("Điểm mới trong phiên bản này:")
         .font(.system(size: 12, weight: .semibold))
         .foregroundStyle(.secondary)
 
       ScrollView {
-        Text(releaseNotes)
-          .font(.system(size: 12))
-          .textSelection(.enabled)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(10)
+        FormattedReleaseNotesView(markdown: releaseNotes)
+          .padding(12)
       }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
       .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
       .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.10), lineWidth: 1))
-      .frame(minHeight: 145)
 
       if updater.isInstallingUpdate {
         VStack(alignment: .leading, spacing: 5) {
@@ -556,6 +577,7 @@ private struct GitHubUpdateSheetView: View {
             .font(.system(size: 11.5, weight: .medium))
             .foregroundStyle(.secondary)
         }
+        .fixedSize(horizontal: false, vertical: true)
       } else if let err = updater.errorMessage {
         HStack(spacing: 6) {
           Image(systemName: "exclamationmark.triangle.fill")
@@ -565,7 +587,10 @@ private struct GitHubUpdateSheetView: View {
             .foregroundStyle(.red)
             .lineLimit(2)
         }
+        .fixedSize(horizontal: false, vertical: true)
       }
+
+      Divider()
 
       HStack(spacing: 10) {
         Button("Xem trên GitHub ↗") {
@@ -594,7 +619,60 @@ private struct GitHubUpdateSheetView: View {
         .disabled(updater.isInstallingUpdate)
         .keyboardShortcut(.defaultAction)
       }
+      .fixedSize(horizontal: false, vertical: true)
     }
-    .padding(20)
+    .padding(18)
+    .frame(minWidth: 480, maxWidth: .infinity, minHeight: 320, maxHeight: .infinity)
+  }
+}
+
+private struct FormattedReleaseNotesView: View {
+  let markdown: String
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      ForEach(Array(markdown.components(separatedBy: .newlines).enumerated()), id: \.offset) { _, rawLine in
+        let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+          Spacer().frame(height: 2)
+        } else if trimmed == "---" || trimmed == "***" {
+          Divider().padding(.vertical, 3)
+        } else if trimmed.hasPrefix("## ") {
+          Text(Self.inlineMarkdown(String(trimmed.dropFirst(3))))
+            .font(.system(size: 13.5, weight: .bold))
+            .padding(.top, 2)
+        } else if trimmed.hasPrefix("### ") {
+          Text(Self.inlineMarkdown(String(trimmed.dropFirst(4))))
+            .font(.system(size: 12.5, weight: .semibold))
+            .padding(.top, 2)
+        } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("•")
+              .font(.system(size: 12, weight: .bold))
+              .foregroundStyle(.secondary)
+            Text(Self.inlineMarkdown(String(trimmed.dropFirst(2))))
+              .font(.system(size: 12))
+              .fixedSize(horizontal: false, vertical: true)
+          }
+        } else {
+          Text(Self.inlineMarkdown(trimmed))
+            .font(.system(size: 12))
+            .foregroundStyle(trimmed.hasPrefix("*") && trimmed.hasSuffix("*") ? .secondary : .primary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+    }
+    .textSelection(.enabled)
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private static func inlineMarkdown(_ text: String) -> AttributedString {
+    if let attr = try? AttributedString(
+      markdown: text,
+      options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+    ) {
+      return attr
+    }
+    return AttributedString(text)
   }
 }

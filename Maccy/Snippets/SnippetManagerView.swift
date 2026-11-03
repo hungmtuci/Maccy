@@ -25,6 +25,7 @@ final class SnippetManagerWindowController {
 
     let rootView = SnippetStudioView()
     let hosting = NSHostingController(rootView: rootView)
+    hosting.sizingOptions = [.minSize]
     let win = NSWindow(contentViewController: hosting)
     win.title = "Quản lý Gõ tắt"
     win.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
