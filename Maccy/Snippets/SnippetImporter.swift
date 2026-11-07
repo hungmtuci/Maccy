@@ -4,6 +4,9 @@ nonisolated struct ImportedSnippetPayload: Sendable {
   var name: String
   var abbreviation: String
   var content: String
+  var rtfData: Data? = nil
+  var htmlData: Data? = nil
+  var imagePNGData: Data? = nil
   var contentMode: SnippetContentMode = .plainText
   var triggerMode: SnippetTriggerMode = .immediate
   var caseMode: SnippetCaseMode = .ignoreCase
@@ -152,11 +155,32 @@ nonisolated enum SnippetImporter {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
     process.arguments = ["-x", "-k", url.path, tempDir.path]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
     try process.run()
     process.waitUntilExit()
 
     guard process.terminationStatus == 0 else {
       throw SnippetImportError.unsupportedFormat("Không thể giải nén gói .alfredsnippets (\(url.lastPathComponent)).")
+    }
+
+    let tempResolvedRoot = tempDir.resolvingSymlinksInPath().standardizedFileURL.path
+    let tempPrefix = tempResolvedRoot.hasSuffix("/") ? tempResolvedRoot : tempResolvedRoot + "/"
+    if let enumerator = fm.enumerator(
+      at: tempDir,
+      includingPropertiesForKeys: [.isSymbolicLinkKey],
+      options: []
+    ) {
+      for case let entryURL as URL in enumerator {
+        if (try? entryURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+          try? fm.removeItem(at: entryURL)
+          continue
+        }
+        let resolvedPath = entryURL.resolvingSymlinksInPath().standardizedFileURL.path
+        if resolvedPath != tempResolvedRoot && !resolvedPath.hasPrefix(tempPrefix) {
+          throw SnippetImportError.unsupportedFormat("Gói .alfredsnippets chứa đường dẫn không hợp lệ.")
+        }
+      }
     }
 
     let collectionName = url.deletingPathExtension().lastPathComponent
@@ -183,14 +207,23 @@ nonisolated enum SnippetImporter {
     var prefix = ""
     var suffix = ""
 
+    let folderResolvedRoot = folder.resolvingSymlinksInPath().standardizedFileURL.path
+    let folderPrefix = folderResolvedRoot.hasSuffix("/") ? folderResolvedRoot : folderResolvedRoot + "/"
+
     let plistURL = folder.appendingPathComponent("info.plist")
-    if let plistData = try? Data(contentsOf: plistURL),
+    if (try? plistURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+       plistURL.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(folderPrefix),
+       let plistData = try? Data(contentsOf: plistURL),
        let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] {
       prefix = (plist["snippetkeywordprefix"] as? String) ?? ""
       suffix = (plist["snippetkeywordsuffix"] as? String) ?? ""
     }
 
-    guard let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+    guard let files = try? fm.contentsOfDirectory(
+      at: folder,
+      includingPropertiesForKeys: [.isSymbolicLinkKey],
+      options: [.skipsHiddenFiles]
+    ) else {
       return nil
     }
 
@@ -198,7 +231,12 @@ nonisolated enum SnippetImporter {
     var items: [ImportedSnippetPayload] = []
 
     for file in files where file.pathExtension.lowercased() == "json" {
-      guard let data = try? Data(contentsOf: file),
+      guard (try? file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else {
+        continue
+      }
+      let resolvedFile = file.resolvingSymlinksInPath().standardizedFileURL.path
+      guard resolvedFile.hasPrefix(folderPrefix),
+            let data = try? Data(contentsOf: file),
             let parsed = try? decoder.decode(RawAlfredFile.self, from: data) else {
         continue
       }
@@ -611,6 +649,9 @@ nonisolated enum SnippetImporter {
               name: item.name,
               abbreviation: item.abbreviation,
               content: item.content,
+              rtfData: item.rtfData,
+              htmlData: item.htmlData,
+              imagePNGData: item.imagePNGData,
               contentMode: item.contentMode,
               triggerMode: item.triggerMode,
               caseMode: item.caseMode,

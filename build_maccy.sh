@@ -12,10 +12,18 @@ export COPYFILE_DISABLE=1
 
 APP_NAME="Maccy"
 BUNDLE_ID="org.p0deje.Maccy"
-VERSION="3.1.4-custom"
+VERSION="3.1.5-custom"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
-WORKSPACE_APP_BUNDLE="$(dirname "$PROJECT_DIR")/$APP_NAME.app"
+ROOT_WORKSPACE_DIR="$(cd "$PROJECT_DIR/.." && pwd)"
+WORKSPACE_APP_BUNDLE="$ROOT_WORKSPACE_DIR/$APP_NAME.app"
+DIST_DIR="$PROJECT_DIR/dist"
 SPM_SCRATCH_DIR="/tmp/maccy_spm_build"
+INSTALL_TO_APPS=0
+for arg in "$@"; do
+  case "$arg" in
+    --install) INSTALL_TO_APPS=1 ;;
+  esac
+done
 
 STAGE_DIR="/tmp/maccy_stage_$$"
 STAGE_APP="$STAGE_DIR/$APP_NAME.app"
@@ -179,16 +187,22 @@ done
 codesign --force --deep --sign - "$STAGE_APP"
 codesign --verify --deep --strict -vvvv "$STAGE_APP"
 
-DIST_ZIP="/tmp/${APP_NAME}-v${VERSION}.zip"
-rm -f "$DIST_ZIP"
+mkdir -p "$DIST_DIR"
+DIST_ZIP="$DIST_DIR/${APP_NAME}-v${VERSION}-macOS.zip"
+DIST_ZIP_COMPAT="$DIST_DIR/${APP_NAME}-v${VERSION}.zip"
+rm -f "$DIST_ZIP" "$DIST_ZIP_COMPAT"
 ditto -c -k --norsrc --keepParent "$STAGE_APP" "$DIST_ZIP"
+cp -f "$DIST_ZIP" "$DIST_ZIP_COMPAT"
 
-echo "==> [5/5] Đang cài đặt sang /Applications/$APP_NAME.app và $WORKSPACE_APP_BUNDLE..."
+echo "==> [5/5] Đang đồng bộ $APP_BUNDLE và $WORKSPACE_APP_BUNDLE..."
 rm -rf "$APP_BUNDLE" "$WORKSPACE_APP_BUNDLE"
-ditto --norsrc "$STAGE_APP" "$APP_BUNDLE"
-ditto --norsrc "$STAGE_APP" "$WORKSPACE_APP_BUNDLE"
+ditto --norsrc --noextattr "$STAGE_APP" "$APP_BUNDLE"
+xattr -cr "$APP_BUNDLE" 2>/dev/null || true
 
-if [ -w "/Applications" ]; then
+ditto --norsrc --noextattr "$STAGE_APP" "$WORKSPACE_APP_BUNDLE"
+xattr -cr "$WORKSPACE_APP_BUNDLE" 2>/dev/null || true
+
+if [ "$INSTALL_TO_APPS" -eq 1 ] && [ -w "/Applications" ]; then
   killall "$APP_NAME" 2>/dev/null || true
   rm -rf "/Applications/$APP_NAME.app"
   ditto --norsrc "$STAGE_APP" "/Applications/$APP_NAME.app"
@@ -197,5 +211,9 @@ fi
 rm -rf "$STAGE_DIR"
 
 echo "==> Hoàn tất đóng gói Maccy.app ($VERSION)!"
-echo "    - /Applications/$APP_NAME.app"
+echo "    - $APP_BUNDLE"
+echo "    - $WORKSPACE_APP_BUNDLE"
+if [ "$INSTALL_TO_APPS" -eq 1 ]; then
+  echo "    - /Applications/$APP_NAME.app"
+fi
 echo "    - Gói cài đặt sạch cho máy khác: $DIST_ZIP"

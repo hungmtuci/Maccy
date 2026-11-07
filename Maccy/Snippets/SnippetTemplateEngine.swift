@@ -741,14 +741,23 @@ nonisolated enum SnippetTemplateEngine {
   }
 
   private static func appendSegmentWithCursor(_ segment: String, item: SnippetItem) -> [ExpandedActionStep] {
-    if let cursorRange = segment.range(of: "{{cursor}}") {
-      let before = String(segment[..<cursorRange.lowerBound])
-      let after = String(segment[cursorRange.upperBound...])
+    let cleanSegment = segment.replacingOccurrences(of: "\r\n", with: "\n")
+    if let cursorRange = cleanSegment.range(of: "{{cursor}}") {
+      let before = String(cleanSegment[..<cursorRange.lowerBound])
+      let after = String(cleanSegment[cursorRange.upperBound...])
         .replacingOccurrences(of: "{{cursor}}", with: "")
       let combined = before + after
       var result: [ExpandedActionStep] = []
       if !combined.isEmpty {
-        result.append(.pasteText(combined, htmlData: nil, rtfData: nil))
+        if after.isEmpty {
+          if item.contentMode == .html {
+            result.append(.pasteText(combined, htmlData: combined.data(using: .utf8), rtfData: nil))
+          } else {
+            result.append(.pasteText(combined, htmlData: item.htmlData, rtfData: item.rtfData))
+          }
+        } else {
+          result.append(.pasteText(combined, htmlData: nil, rtfData: nil))
+        }
       }
       let moveLeftCount = after.count
       if moveLeftCount > 0 {
@@ -758,9 +767,9 @@ nonisolated enum SnippetTemplateEngine {
     }
 
     if item.contentMode == .html {
-      return [.pasteText(segment, htmlData: segment.data(using: .utf8), rtfData: nil)]
+      return [.pasteText(cleanSegment, htmlData: cleanSegment.data(using: .utf8), rtfData: nil)]
     }
-    return [.pasteText(segment, htmlData: item.htmlData, rtfData: item.rtfData)]
+    return [.pasteText(cleanSegment, htmlData: item.htmlData, rtfData: item.rtfData)]
   }
 
   private static func splitLabelAndDefault(_ raw: String) -> (label: String, defaultValue: String) {

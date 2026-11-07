@@ -760,6 +760,12 @@ class CloudSyncManager {
     folderURL: URL,
     encryptionKey: SymmetricKey?
   ) -> [SyncedContentPayload] {
+    let safeSyncId = String(syncId.unicodeScalars.map { scalar -> Character in
+      if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-" {
+        return Character(scalar)
+      }
+      return "_"
+    })
     var result: [SyncedContentPayload] = []
     for (idx, raw) in rawPayloads.enumerated() {
       var processedData = raw.data
@@ -783,7 +789,7 @@ class CloudSyncManager {
 
       // 3. Offload large blobs (> 64 KB) to separate file in `blobs/` to keep JSON lightweight & conflict-free
       if processedData.count >= Self.externalBlobThresholdBytes {
-        let relPath = "blobs/\(syncId)_\(idx).blob"
+        let relPath = "blobs/\(safeSyncId)_\(idx).blob"
         let blobURL = folderURL.appendingPathComponent(relPath, isDirectory: false)
         if (try? processedData.write(to: blobURL, options: [.atomic])) != nil {
           result.append(
@@ -842,8 +848,12 @@ class CloudSyncManager {
       for payload in remote.contents {
         var data = payload.value
         if let relPath = payload.blobFileName, !relPath.isEmpty {
-          let blobURL = folderURL.appendingPathComponent(relPath, isDirectory: false)
-          guard let fileData = try? Data(contentsOf: blobURL) else {
+          let blobsDirURL = folderURL.appendingPathComponent("blobs", isDirectory: true).standardizedFileURL
+          let candidateURL = folderURL.appendingPathComponent(relPath, isDirectory: false).standardizedFileURL
+          guard candidateURL.deletingLastPathComponent() == blobsDirURL,
+                candidateURL.pathExtension.lowercased() == "blob",
+                (try? candidateURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+                let fileData = try? Data(contentsOf: candidateURL) else {
             continue
           }
           data = fileData

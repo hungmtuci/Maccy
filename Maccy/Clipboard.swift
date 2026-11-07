@@ -364,7 +364,8 @@ class Clipboard {
 
       case .keyPress(let kind, let count):
         guard count > 0 else { continue }
-        postEmulatedKeys(kind: kind, count: min(count, 500), syntheticTag: syntheticTag)
+        let maxKeys = (kind == .leftArrow) ? 2000 : 500
+        postEmulatedKeys(kind: kind, count: min(count, maxKeys), syntheticTag: syntheticTag)
         try? await Task.sleep(for: .milliseconds(25))
 
       case .delayMilliseconds(let ms):

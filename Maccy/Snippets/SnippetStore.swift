@@ -657,6 +657,9 @@ class SnippetStore {
         if var current = matchedExisting {
           current.name = entry.name.isEmpty ? current.name : entry.name
           current.content = entry.content
+          current.rtfData = entry.rtfData ?? current.rtfData
+          current.htmlData = entry.htmlData ?? current.htmlData
+          current.imagePNGData = entry.imagePNGData ?? current.imagePNGData
           current.contentMode = entry.contentMode
           current.triggerMode = abbr.isEmpty ? .manualOnly : entry.triggerMode
           current.caseMode = entry.caseMode
@@ -671,6 +674,9 @@ class SnippetStore {
             name: entry.name,
             abbreviation: abbr,
             content: entry.content,
+            rtfData: entry.rtfData,
+            htmlData: entry.htmlData,
+            imagePNGData: entry.imagePNGData,
             contentMode: entry.contentMode,
             triggerMode: abbr.isEmpty ? .manualOnly : entry.triggerMode,
             caseMode: entry.caseMode,
@@ -1293,14 +1299,43 @@ class SnippetStore {
         self.lastObservedCloudModificationDate = modDate
       }
       if changedFromRemote {
-        self.allCollections = mergedPlainDB.collections
-        self.allItems = mergedPlainDB.items
+        var finalCollections = mergedPlainDB.collections
+        for (colId, localCol) in self.allCollections {
+          if let syncedCol = finalCollections[colId] {
+            if localCol.updatedAt > syncedCol.updatedAt {
+              finalCollections[colId] = localCol
+            }
+          } else {
+            finalCollections[colId] = localCol
+          }
+        }
+
+        var finalItems = mergedPlainDB.items
+        for (itemId, localItem) in self.allItems {
+          if let syncedItem = finalItems[itemId] {
+            if localItem.updatedAt > syncedItem.updatedAt {
+              finalItems[itemId] = localItem
+            }
+          } else {
+            finalItems[itemId] = localItem
+          }
+        }
+
+        self.allCollections = finalCollections
+        self.allItems = finalItems
         rebuildCaches()
         await Self.writeLocalSnapshot(collections: allCollections, items: allItems)
       }
       let activeCount = items.count
       lastSnippetSyncMessage = "Đã đồng bộ \(activeCount) gõ tắt qua Google Drive"
     }
+  }
+
+  private nonisolated struct EncryptedSnippetPayload: Codable, Sendable {
+    var content: String
+    var rtfData: Data?
+    var htmlData: Data?
+    var imagePNGData: Data?
   }
 
   private nonisolated static func prepareCloudSnippetItem(_ item: SnippetItem, key: SymmetricKey?) -> SnippetItem {
@@ -1310,9 +1345,18 @@ class SnippetStore {
       out.encryptedContent = nil
       return out
     }
-    if let utf8 = item.content.data(using: .utf8),
-       let box = try? AES.GCM.seal(utf8, using: key).combined {
+    let payload = EncryptedSnippetPayload(
+      content: item.content,
+      rtfData: item.rtfData,
+      htmlData: item.htmlData,
+      imagePNGData: item.imagePNGData
+    )
+    if let encoded = try? JSONEncoder().encode(payload),
+       let box = try? AES.GCM.seal(encoded, using: key).combined {
       out.content = ""
+      out.rtfData = nil
+      out.htmlData = nil
+      out.imagePNGData = nil
       out.encryptedContent = box
       out.isPayloadEncrypted = true
     }
@@ -1324,11 +1368,19 @@ class SnippetStore {
     if item.isPayloadEncrypted == true, let enc = item.encryptedContent {
       guard let key,
             let box = try? AES.GCM.SealedBox(combined: enc),
-            let opened = try? AES.GCM.open(box, using: key),
-            let text = String(data: opened, encoding: .utf8) else {
+            let opened = try? AES.GCM.open(box, using: key) else {
         return nil
       }
-      out.content = text
+      if let payload = try? JSONDecoder().decode(EncryptedSnippetPayload.self, from: opened) {
+        out.content = payload.content
+        out.rtfData = payload.rtfData
+        out.htmlData = payload.htmlData
+        out.imagePNGData = payload.imagePNGData
+      } else if let text = String(data: opened, encoding: .utf8) {
+        out.content = text
+      } else {
+        return nil
+      }
       out.encryptedContent = nil
       out.isPayloadEncrypted = nil
     }
